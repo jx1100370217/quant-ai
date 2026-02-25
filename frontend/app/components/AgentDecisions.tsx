@@ -34,14 +34,7 @@ interface BuyCandidate {
   sectorName: string; reasons: string[]; score: number
 }
 
-const HOLDINGS = [
-  { code: '300394', name: '天孚通信', cost: 280.50 },
-  { code: '002916', name: '深南电路', cost: 220.00 },
-  { code: '600183', name: '生益科技', cost: 58.30 },
-  { code: '300308', name: '中际旭创', cost: 510.00 },
-  { code: '002463', name: '沪电股份', cost: 65.40 },
-  { code: '300502', name: '新易盛', cost: 350.00 },
-]
+// Holdings 由父组件 Dashboard 从东方财富 API 动态传入
 
 const signalConfig = {
   buy:  { label: '买入', emoji: '▲', text: 'text-red-400',    bg: 'bg-red-900/20',    border: 'border-red-500/40' },
@@ -63,7 +56,7 @@ function runMarketAnalyst(q: StockQuote, marketData: any): AgentAnalysis {
   const sectors: any[] = marketData?.sectors ?? []
   const topSector = sectors[0]
   if (topSector) {
-    const inSector = q.percent > 0 && q.change > 0
+    const inSector = q.percent > 0 && q.chg > 0
     if (inSector) { points.push(`今日领涨板块「${topSector.name}」，个股走势与板块共振`); score += 1 }
     else { points.push(`今日领涨板块「${topSector.name}」，个股未能跟随强势板块`) }
   }
@@ -211,12 +204,13 @@ function buildStockAnalysis(q: StockQuote, h: { cost: number; name: string }, ma
 }
 
 interface AgentDecisionsProps {
+  holdings?: Array<{ code: string; name: string; cost: number; shares?: number }>
   selectedCode?: string | null
   onSelectStock?: (code: string, name: string) => void
 }
 
 // ─── 主组件 ───────────────────────────────────────────────────
-export default function AgentDecisions({ selectedCode, onSelectStock }: AgentDecisionsProps) {
+export default function AgentDecisions({ holdings = [], selectedCode, onSelectStock }: AgentDecisionsProps) {
   const [analyses, setAnalyses] = useState<StockAnalysis[]>([])
   const [buyCandidate, setBuyCandidate] = useState<BuyCandidate | null>(null)
   const [loading, setLoading] = useState(true)
@@ -235,9 +229,13 @@ export default function AgentDecisions({ selectedCode, onSelectStock }: AgentDec
   }
 
   useEffect(() => {
+    if (holdings.length === 0) {
+      setLoading(false)
+      return
+    }
     const fetchAll = async () => {
       try {
-        const codes = HOLDINGS.map(h => h.code).join(',')
+        const codes = holdings.map(h => h.code).join(',')
         const [quoteRes, marketRes] = await Promise.all([
           fetch(`/api/quote?codes=${codes}`),
           fetch('/api/market'),
@@ -247,7 +245,7 @@ export default function AgentDecisions({ selectedCode, onSelectStock }: AgentDec
 
         if (quoteData.success && quoteData.data) {
           const allQuotes: StockQuote[] = quoteData.data
-          const results = HOLDINGS.map(h => {
+          const results = holdings.map(h => {
             const q = allQuotes.find((d: any) => d.code === h.code)
             if (!q) return null
             return buildStockAnalysis(q, h, marketData.success ? marketData : {}, allQuotes)
@@ -265,7 +263,7 @@ export default function AgentDecisions({ selectedCode, onSelectStock }: AgentDec
           const sectorRes = await fetch(`/api/sector-stocks?code=${topSector.code}&limit=15`)
           const sectorData = await sectorRes.json()
           if (sectorData.success) {
-            const holdingCodes = new Set(HOLDINGS.map(h => h.code))
+            const holdingCodes = new Set(holdings.map(h => h.code))
             const available = sectorData.stocks.filter((s: any) => !holdingCodes.has(s.code))
             const candidates = available
               .filter((s: any) => s.changePct > 1 && s.changePct < 9 && s.mainNetInflow > 0)
@@ -292,7 +290,7 @@ export default function AgentDecisions({ selectedCode, onSelectStock }: AgentDec
     fetchAll()
     const timer = setInterval(fetchAll, 30000)
     return () => clearInterval(timer)
-  }, [])
+  }, [holdings.map(h => h.code).join(',')])
 
   const buyCount  = analyses.filter(a => a.overallSignal === 'buy').length
   const sellCount = analyses.filter(a => a.overallSignal === 'sell').length
@@ -301,11 +299,25 @@ export default function AgentDecisions({ selectedCode, onSelectStock }: AgentDec
   const overallSignal = sellCount >= 3 ? 'sell' : buyCount >= 3 ? 'buy' : 'hold'
   const overallCfg = signalConfig[overallSignal]
 
-  if (loading) {
+  if (loading && holdings.length > 0) {
     return (
       <div className="cyber-card p-5">
         <div className="flex items-center justify-center h-40 text-gray-500">
           <Loader2 className="w-5 h-5 animate-spin mr-2" />AI分析中...
+        </div>
+      </div>
+    )
+  }
+
+  if (holdings.length === 0) {
+    return (
+      <div className="cyber-card p-5">
+        <div className="flex items-center space-x-2 mb-4">
+          <Brain className="w-5 h-5 text-neon-cyan" />
+          <h2 className="text-lg font-semibold">AI Agent 决策面板</h2>
+        </div>
+        <div className="flex items-center justify-center h-32 text-gray-500 text-sm">
+          正在加载真实持仓数据...
         </div>
       </div>
     )

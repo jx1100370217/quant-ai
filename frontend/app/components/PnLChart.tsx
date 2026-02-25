@@ -12,23 +12,15 @@ interface Props {
   cost?: number
 }
 
-const HOLDINGS_MAP: Record<string, { name: string; cost: number }> = {
-  '300394': { name: '天孚通信', cost: 280.50 },
-  '002916': { name: '深南电路', cost: 220.00 },
-  '600183': { name: '生益科技', cost: 58.30 },
-  '300308': { name: '中际旭创', cost: 510.00 },
-  '002463': { name: '沪电股份', cost: 65.40 },
-  '300502': { name: '新易盛', cost: 350.00 },
-}
-
+// 默认展示第一只持仓；cost/name 由 Dashboard 从真实持仓传入
 export default function PnLChart({ stockCode: externalCode, stockName: externalName, cost: externalCost }: Props) {
   const [data, setData] = useState<PnLPoint[]>([])
   const [loading, setLoading] = useState(true)
-  const [activeCode, setActiveCode] = useState(externalCode || '600183')
+  // 默认 000852 石化机械（实际会被 Dashboard 覆盖）
+  const [activeCode, setActiveCode] = useState(externalCode || '000852')
 
-  const holding = HOLDINGS_MAP[activeCode]
-  const cost = externalCost ?? holding?.cost ?? 0
-  const name = externalName ?? holding?.name ?? activeCode
+  const cost = externalCost ?? 0
+  const name = externalName ?? activeCode
 
   const fetchPnL = async (code: string, costPrice: number) => {
     setLoading(true)
@@ -74,14 +66,15 @@ export default function PnLChart({ stockCode: externalCode, stockName: externalN
     }
   }
 
-  // 外部 code 变化时同步
+  // 外部 code / cost 变化时同步
   useEffect(() => {
-    const code = externalCode || '600183'
+    const code = externalCode || '000852'
     setActiveCode(code)
   }, [externalCode])
 
   useEffect(() => {
-    if (activeCode && cost !== undefined) {
+    // cost 必须有值才拉取（避免 cost=0 时用错基准价）
+    if (activeCode && cost > 0) {
       fetchPnL(activeCode, cost)
     }
   }, [activeCode, cost])

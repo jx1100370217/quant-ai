@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { Activity, TrendingUp, Brain, Shield, Clock } from 'lucide-react'
 import MarketOverview from './MarketOverview'
 import SectorFlow from './SectorFlow'
@@ -12,14 +12,21 @@ import PnLChart from './PnLChart'
 import RiskGauge from './RiskGauge'
 import AgentChat, { LogEntry } from './AgentChat'
 
-const HOLDINGS = [
-  { code: '300394', name: '天孚通信', cost: 280.50 },
-  { code: '002916', name: '深南电路', cost: 220.00 },
-  { code: '600183', name: '生益科技', cost: 58.30 },
-  { code: '300308', name: '中际旭创', cost: 510.00 },
-  { code: '002463', name: '沪电股份', cost: 65.40 },
-  { code: '300502', name: '新易盛', cost: 350.00 },
-]
+export interface HoldingItem {
+  code: string
+  name: string
+  cost: number
+  shares: number
+}
+
+export interface PortfolioSummary {
+  cash: number
+  totalAssets: number
+  totalMarketValue: number
+  totalPnl: number
+  todayPnl: number
+  positions: HoldingItem[]
+}
 
 const agentColors: Record<string, string> = {
   SYSTEM: 'text-gray-500',
@@ -41,15 +48,61 @@ export default function Dashboard() {
   const [lastUpdate, setLastUpdate] = useState<string>('')
   const [mounted, setMounted] = useState(false)
 
+  // 真实持仓
+  const [holdings, setHoldings] = useState<HoldingItem[]>([])
+  const [portfolio, setPortfolio] = useState<PortfolioSummary | null>(null)
+  const [portfolioError, setPortfolioError] = useState<string | null>(null)
+
   // 分析状态
   const [logs, setLogs] = useState<LogEntry[]>([])
   const [signals, setSignals] = useState<TradeSignal[]>([])
   const [analysisRunning, setAnalysisRunning] = useState(false)
 
   // 图表联动状态
-  const [selectedStock, setSelectedStock] = useState<{ code: string; name: string } | null>(null)
+  const [selectedStock, setSelectedStock] = useState<{ code: string; name: string; cost: number } | null>(null)
+  // 用 ref 保证 handleSelectStock 总能拿到最新 holdings
+  const holdingsRef = useRef<HoldingItem[]>([])
+  useEffect(() => { holdingsRef.current = holdings }, [holdings])
+
   const handleSelectStock = useCallback((code: string, name: string) => {
-    setSelectedStock({ code, name })
+    const h = holdingsRef.current.find(h => h.code === code)
+    setSelectedStock({ code, name, cost: h?.cost ?? 0 })
+  }, [])
+
+  // 拉取真实持仓
+  const fetchPortfolio = useCallback(async () => {
+    try {
+      const res = await fetch('/api/portfolio')
+      const data = await res.json()
+      if (data.success && data.data) {
+        const p = data.data
+        const items: HoldingItem[] = p.positions.map((pos: any) => ({
+          code: pos.code,
+          name: pos.name,
+          cost: pos.cost,
+          shares: pos.shares,
+        }))
+        setHoldings(items)
+        setPortfolio({
+          cash: p.cash,
+          totalAssets: p.totalAssets,
+          totalMarketValue: p.totalMarketValue,
+          totalPnl: p.totalPnl,
+          todayPnl: p.todayPnl,
+          positions: items,
+        })
+        setPortfolioError(null)
+        // 默认选中第一只（用函数式更新避免依赖 selectedStock 旧值）
+        setSelectedStock(prev => prev ?? (items.length > 0
+          ? { code: items[0].code, name: items[0].name, cost: items[0].cost }
+          : null
+        ))
+      } else {
+        setPortfolioError(data.error || '获取持仓失败')
+      }
+    } catch (e: any) {
+      setPortfolioError(e.message)
+    }
   }, [])
 
   useEffect(() => {
@@ -62,7 +115,17 @@ export default function Dashboard() {
       setIsConnected(true)
       setLastUpdate(new Date().toLocaleTimeString('zh-CN'))
     }, 2000)
-    return () => { clearInterval(timer); clearTimeout(connectTimer) }
+
+    // 首次加载持仓
+    fetchPortfolio()
+    // 每分钟刷新一次
+    const portfolioTimer = setInterval(fetchPortfolio, 60000)
+
+    return () => {
+      clearInterval(timer)
+      clearTimeout(connectTimer)
+      clearInterval(portfolioTimer)
+    }
   }, [])
 
   const addLog = useCallback((agent: string, message: string) => {
@@ -78,13 +141,17 @@ export default function Dashboard() {
 
   const runAnalysis = useCallback(async () => {
     if (analysisRunning) return
+    if (holdings.length === 0) {
+      addLog('SYSTEM', '⚠️ 暂无持仓数据，请确认东方财富App已登录')
+      return
+    }
     setAnalysisRunning(true)
     setLogs([])
     setSignals([])
     const newSignals: TradeSignal[] = []
 
     try {
-      addLog('SYSTEM', '🚀 启动全量分析...')
+      addLog('SYSTEM', `🚀 启动全量分析 (持仓 ${holdings.length} 只)...`)
       await delay(300)
 
       // === 1. 市场分析 ===
@@ -99,6 +166,10 @@ export default function Dashboard() {
           const sh = marketData.indices['000001']
           if (sh) {
             addLog('MarketAnalyst', `上证 ${sh.price.toFixed(2)} (${sh.change_pct >= 0 ? '+' : ''}${sh.change_pct.toFixed(2)}%)`)
+          }
+          const sz = marketData.indices['399001']
+          if (sz) {
+            addLog('MarketAnalyst', `深证 ${sz.price.toFixed(2)} (${sz.change_pct >= 0 ? '+' : ''}${sz.change_pct.toFixed(2)}%)`)
           }
         }
       } catch (e) {
@@ -118,10 +189,10 @@ export default function Dashboard() {
       await delay(400)
 
       // === 2. 技术分析 - 获取持仓行情 ===
-      addLog('TechAnalyst', '获取持仓股实时行情...')
+      addLog('TechAnalyst', `获取持仓股实时行情 [${holdings.map(h => h.name).join(' / ')}]...`)
       await delay(200)
 
-      const codes = HOLDINGS.map(h => h.code).join(',')
+      const codes = holdings.map(h => h.code).join(',')
       let quoteData: any = null
       try {
         const quoteRes = await fetch(`/api/quote?codes=${codes}`)
@@ -136,14 +207,15 @@ export default function Dashboard() {
 
       // === 3. 逐股分析 ===
       if (quoteData?.success && quoteData.data) {
-        for (const holding of HOLDINGS) {
+        for (const holding of holdings) {
           const q = quoteData.data.find((d: any) => d.code === holding.code)
           if (!q) continue
 
           const pnlPct = ((q.current - holding.cost) / holding.cost) * 100
           const dayRange = q.high > 0 ? ((q.current - q.low) / (q.high - q.low)) * 100 : 50
+          const pnlAbs = (q.current - holding.cost) * holding.shares
 
-          addLog('TechAnalyst', `${holding.name} ${q.current.toFixed(2)} (${q.percent >= 0 ? '+' : ''}${q.percent.toFixed(2)}%) 累计${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(1)}%`)
+          addLog('TechAnalyst', `${holding.name}(${holding.code}) ${q.current.toFixed(3)} (${q.percent >= 0 ? '+' : ''}${q.percent.toFixed(2)}%) | ${holding.shares}股 | 累计${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(1)}% (${pnlAbs >= 0 ? '+' : ''}${pnlAbs.toFixed(0)}元)`)
           await delay(150)
 
           // 生成信号
@@ -152,18 +224,20 @@ export default function Dashboard() {
           let reason = ''
 
           if (q.percent > 8 && pnlPct > 20) {
-            action = 'sell'; confidence = 82; reason = `涨幅超${q.percent.toFixed(0)}%触发止盈线，减仓5%`
+            action = 'sell'; confidence = 82; reason = `涨幅超${q.percent.toFixed(0)}%触发止盈线，建议减仓`
           } else if (q.percent > 5 && pnlPct > 15) {
             action = 'sell'; confidence = 72; reason = '短期涨幅过大，建议部分止盈'
-          } else if (q.percent < -5 && pnlPct < -5) {
-            action = 'sell'; confidence = 70; reason = `跌幅较大且亏损${pnlPct.toFixed(1)}%，建议止损`
-          } else if (q.percent > 2 && pnlPct > 0 && pnlPct < 15) {
+          } else if (pnlPct < -8) {
+            action = 'sell'; confidence = 75; reason = `亏损${pnlPct.toFixed(1)}%触发止损线，建议出局`
+          } else if (q.percent < -5 && pnlPct < -3) {
+            action = 'sell'; confidence = 65; reason = `跌幅${q.percent.toFixed(1)}%，关注止损`
+          } else if (q.percent > 2 && pnlPct > -5 && pnlPct < 15) {
             action = 'buy'; confidence = 68; reason = '趋势向好，可适当加仓'
           } else if (q.percent > 0 && dayRange > 70) {
             action = 'buy'; confidence = 65; reason = '放量上涨趋势良好，继续持有或加仓'
           } else if (q.percent < -2 && pnlPct > 10) {
-            action = 'hold'; confidence = 65; reason = '回调不深，继续持有'
-          } else if (q.percent > -1 && q.percent < 1) {
+            action = 'hold'; confidence = 65; reason = '回调不深，盈利充足，继续持有'
+          } else if (Math.abs(q.percent) < 1) {
             action = 'hold'; confidence = 60; reason = '震荡整理中，等待方向选择'
           } else {
             action = 'hold'; confidence = 58; reason = '维持现有仓位'
@@ -181,9 +255,14 @@ export default function Dashboard() {
       await delay(300)
 
       // === 4. 基本面分析 ===
-      addLog('FundAnalyst', '分析持仓标的基本面...')
+      addLog('FundAnalyst', `分析持仓标的基本面 [${holdings.map(h => h.name).join(' / ')}]...`)
       await delay(500)
-      addLog('FundAnalyst', '基本面评估完成，整体基本面良好')
+      for (const h of holdings) {
+        const pnlPct = portfolio ? ((portfolio.totalPnl) / (portfolio.totalAssets - portfolio.totalPnl)) * 100 : 0
+        addLog('FundAnalyst', `${h.name}: 成本${h.cost.toFixed(3)}, ${h.shares}股, 关注行业景气度与财报催化`)
+        await delay(200)
+      }
+      addLog('FundAnalyst', '基本面评估完成')
       await delay(300)
 
       // === 5. 情绪分析 ===
@@ -199,6 +278,11 @@ export default function Dashboard() {
       // === 6. 风险评估 ===
       addLog('RiskManager', '评估持仓风险...')
       await delay(400)
+      if (portfolio) {
+        const positionRatio = (portfolio.totalMarketValue / portfolio.totalAssets * 100).toFixed(1)
+        const pnlPct = portfolio.totalAssets > 0 ? (portfolio.totalPnl / (portfolio.totalAssets - portfolio.totalPnl) * 100).toFixed(1) : '0.0'
+        addLog('RiskManager', `仓位: ${positionRatio}% | 总盈亏: ${Number(pnlPct) >= 0 ? '+' : ''}${pnlPct}% | 持仓集中度: ${holdings.length === 1 ? '单一持仓(高)' : '多元化'}`)
+      }
       const sellCount = newSignals.filter(s => s.action === 'sell').length
       const buyCount = newSignals.filter(s => s.action === 'buy').length
       addLog('RiskManager', `持仓检查完成 | 建议卖出:${sellCount} 买入:${buyCount} 持有:${newSignals.length - sellCount - buyCount}`)
@@ -215,7 +299,6 @@ export default function Dashboard() {
       addLog('PortfolioMgr', `▶ 最终决策: ${overall}`)
       await delay(200)
 
-      // 输出具体操作
       for (const sig of newSignals) {
         if (sig.action !== 'hold') {
           const emoji = sig.action === 'buy' ? '📈' : '📉'
@@ -226,7 +309,6 @@ export default function Dashboard() {
 
       setSignals(newSignals)
       setLastUpdate(now())
-
       addLog('SYSTEM', `✅ 分析完成，生成 ${newSignals.length} 条信号`)
 
     } catch (e) {
@@ -234,7 +316,7 @@ export default function Dashboard() {
     } finally {
       setAnalysisRunning(false)
     }
-  }, [analysisRunning, addLog])
+  }, [analysisRunning, addLog, holdings, portfolio])
 
   return (
     <div className="min-h-screen p-4 lg:p-6 space-y-6">
@@ -257,21 +339,28 @@ export default function Dashboard() {
               {isConnected ? '已连接' : '连接中...'}
             </span>
           </div>
-
+          {portfolio && (
+            <div className="flex items-center space-x-1 text-xs">
+              <span className="text-gray-500">总资产</span>
+              <span className="font-mono text-cyan-400">¥{(portfolio.totalAssets / 10000).toFixed(2)}万</span>
+              <span className={`font-mono ml-1 ${portfolio.totalPnl >= 0 ? 'text-red-400' : 'text-green-400'}`}>
+                ({portfolio.totalPnl >= 0 ? '+' : ''}{portfolio.totalPnl.toFixed(0)})
+              </span>
+            </div>
+          )}
+          {portfolioError && (
+            <div className="text-xs text-yellow-500">⚠️ {portfolioError}</div>
+          )}
           <div className="flex items-center space-x-2 text-gray-400">
             <Clock className="w-4 h-4" />
             <span className="font-mono">{currentTime || '--:--:--'}</span>
           </div>
-
           <div className="flex items-center space-x-2">
             <Activity className="w-4 h-4 text-neon-green" />
             <span className="text-green-400">交易中</span>
           </div>
-
           {lastUpdate && (
-            <div className="text-xs text-gray-500">
-              更新于 {lastUpdate}
-            </div>
+            <div className="text-xs text-gray-500">更新于 {lastUpdate}</div>
           )}
         </div>
       </header>
@@ -285,6 +374,7 @@ export default function Dashboard() {
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
             <div className="lg:col-span-2">
               <AgentDecisions
+                holdings={holdings}
                 selectedCode={selectedStock?.code ?? null}
                 onSelectStock={handleSelectStock}
               />
@@ -302,6 +392,7 @@ export default function Dashboard() {
             <PnLChart
               stockCode={selectedStock?.code}
               stockName={selectedStock?.name}
+              cost={selectedStock?.cost}
             />
           </div>
 
@@ -311,7 +402,7 @@ export default function Dashboard() {
         {/* 右侧边栏 */}
         <div className="xl:col-span-4 space-y-6">
           <PortfolioPanel />
-          <RiskGauge />
+          <RiskGauge portfolio={portfolio} />
           <AgentChat logs={logs} running={analysisRunning} onReanalyze={runAnalysis} />
         </div>
       </div>
@@ -322,9 +413,7 @@ export default function Dashboard() {
           <div className="flex items-center space-x-4">
             <span>© 2024 QuantAI. All rights reserved.</span>
             <span>•</span>
-            <span>数据延迟: ~1秒</span>
-            <span>•</span>
-            <span>API状态: 正常</span>
+            <span>数据来源：东方财富实时持仓</span>
           </div>
           <div className="flex items-center space-x-4">
             <div className="flex items-center space-x-2">

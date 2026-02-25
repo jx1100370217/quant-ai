@@ -34,7 +34,7 @@ const CustomTooltip = ({ active, payload, label }: any) => {
 export default function KLineChart({ stockCode: externalCode, stockName: externalName }: Props) {
   const [data, setData] = useState<KlineData[]>([])
   const [stockName, setStockName] = useState(externalName || '加载中...')
-  const [stockCode, setStockCode] = useState(externalCode || '600183')
+  const [stockCode, setStockCode] = useState(externalCode || '000852')
   const [period, setPeriod] = useState('101')
   const [loading, setLoading] = useState(true)
 
@@ -59,11 +59,13 @@ export default function KLineChart({ stockCode: externalCode, stockName: externa
     finally { setLoading(false) }
   }
 
-  // 外部 code 变化时同步
+  // 外部 code/name 变化时同步（含名字）
   useEffect(() => {
     if (externalCode && externalCode !== stockCode) {
       setStockCode(externalCode)
-      if (externalName) setStockName(externalName)
+      setStockName(externalName || '加载中...')
+    } else if (externalName && externalName !== stockName) {
+      setStockName(externalName)
     }
   }, [externalCode, externalName])
 
