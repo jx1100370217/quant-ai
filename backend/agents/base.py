@@ -1,11 +1,20 @@
+"""
+Agent 基类 - LLM 驱动版本
+"""
 from abc import ABC, abstractmethod
 from typing import Dict, List, Any, Optional
 from datetime import datetime
 import asyncio
 import json
+import logging
+
+from models.agent_models import AgentSignal
+
+logger = logging.getLogger(__name__)
+
 
 class BaseAgent(ABC):
-    """Agent基类"""
+    """Agent 基类"""
     
     def __init__(self, name: str, description: str):
         self.name = name
@@ -15,151 +24,100 @@ class BaseAgent(ABC):
         self.is_running = False
         
     @abstractmethod
-    async def analyze(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        """执行分析，返回分析结果"""
+    async def analyze(self, data: Dict[str, Any]) -> Dict[str, AgentSignal]:
+        """
+        执行分析，返回 {stock_code: AgentSignal} 的字典。
+        每个 Agent 必须实现此方法。
+        """
         pass
-        
-    async def get_signal(self, analysis: Dict[str, Any]) -> Dict[str, Any]:
-        """根据分析结果生成交易信号"""
-        return {
-            "signal": "HOLD",  # BUY, SELL, HOLD
-            "confidence": 0.5,  # 0-1
-            "reason": "默认持有",
-            "timestamp": datetime.now().isoformat()
-        }
         
     def save_analysis(self, analysis: Dict[str, Any]):
         """保存分析结果"""
-        analysis["timestamp"] = datetime.now().isoformat()
-        analysis["agent"] = self.name
-        self.last_analysis = analysis
-        self.analysis_history.append(analysis)
-        
-        # 只保留最近100条记录
+        record = {
+            "timestamp": datetime.now().isoformat(),
+            "agent": self.name,
+            "results": analysis,
+        }
+        self.last_analysis = record
+        self.analysis_history.append(record)
         if len(self.analysis_history) > 100:
             self.analysis_history = self.analysis_history[-100:]
             
     def get_status(self) -> Dict[str, Any]:
-        """获取Agent状态"""
+        """获取 Agent 状态"""
         return {
             "name": self.name,
             "description": self.description,
             "is_running": self.is_running,
             "last_analysis_time": self.last_analysis.get("timestamp") if self.last_analysis else None,
-            "analysis_count": len(self.analysis_history)
+            "analysis_count": len(self.analysis_history),
         }
         
-    async def run_analysis(self, market_data: Dict[str, Any]) -> Dict[str, Any]:
-        """运行完整的分析流程"""
+    async def run_analysis(self, market_data: Dict[str, Any]) -> Dict[str, AgentSignal]:
+        """运行完整分析流程"""
         try:
             self.is_running = True
-            
-            # 执行分析
-            analysis = await self.analyze(market_data)
-            
-            # 生成信号
-            signal = await self.get_signal(analysis)
-            
-            # 合并结果
-            result = {
-                **analysis,
-                "signal": signal,
-                "agent": self.name,
-                "timestamp": datetime.now().isoformat()
-            }
-            
-            # 保存结果
-            self.save_analysis(result)
-            
-            return result
-            
+            results = await self.analyze(market_data)
+            self.save_analysis({k: v.model_dump() for k, v in results.items()})
+            return results
         except Exception as e:
-            error_result = {
-                "error": str(e),
-                "agent": self.name,
-                "timestamp": datetime.now().isoformat()
-            }
-            self.save_analysis(error_result)
-            return error_result
-            
+            logger.error(f"Agent {self.name} analysis failed: {e}", exc_info=True)
+            return {}
         finally:
             self.is_running = False
-            
-    def format_analysis_for_display(self, analysis: Dict[str, Any]) -> str:
-        """格式化分析结果用于显示"""
-        if not analysis:
-            return f"{self.name}: 暂无分析结果"
-            
-        signal = analysis.get("signal", {})
-        signal_type = signal.get("signal", "HOLD")
-        confidence = signal.get("confidence", 0)
-        reason = signal.get("reason", "")
-        
-        # 信号图标
-        signal_icon = {
-            "BUY": "🟢",
-            "SELL": "🔴", 
-            "HOLD": "🟡"
-        }.get(signal_type, "❓")
-        
-        return f"{signal_icon} {self.name}: {signal_type} (置信度: {confidence:.1%}) - {reason}"
+
 
 class AgentManager:
-    """Agent管理器"""
+    """Agent 管理器"""
     
     def __init__(self):
         self.agents: Dict[str, BaseAgent] = {}
-        self.analysis_results: Dict[str, Any] = {}
+        self.analysis_results: Dict[str, Dict[str, AgentSignal]] = {}
         
     def register_agent(self, agent: BaseAgent):
-        """注册Agent"""
+        """注册 Agent"""
         self.agents[agent.name] = agent
         
     def get_agent(self, name: str) -> Optional[BaseAgent]:
-        """获取Agent"""
+        """获取 Agent"""
         return self.agents.get(name)
         
-    async def run_all_agents(self, market_data: Dict[str, Any]) -> Dict[str, Any]:
-        """并发运行所有Agent"""
-        tasks = []
-        for agent in self.agents.values():
-            tasks.append(agent.run_analysis(market_data))
-            
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        # 整理结果
-        agent_results = {}
-        for i, (name, agent) in enumerate(self.agents.items()):
-            result = results[i]
-            if isinstance(result, Exception):
-                agent_results[name] = {
-                    "error": str(result),
-                    "agent": name,
-                    "timestamp": datetime.now().isoformat()
-                }
-            else:
-                agent_results[name] = result
-                
+    async def run_all_agents(
+        self,
+        market_data: Dict[str, Any],
+        concurrency: int = 8,
+    ) -> Dict[str, Dict[str, AgentSignal]]:
+        """
+        并发运行所有 Agent（asyncio.gather + Semaphore）。
+        concurrency=8 表示最多同时 8 个 LLM 调用，避免触发 429。
+        16 个 agent 原来串行约 240s，并发后预计 30-40s。
+        """
+        semaphore = asyncio.Semaphore(concurrency)
+
+        async def _run_one(name: str, agent: "BaseAgent"):
+            async with semaphore:
+                logger.info(f"运行 Agent: {name}")
+                try:
+                    result = await agent.run_analysis(market_data)
+                    return name, result
+                except Exception as e:
+                    logger.error(f"Agent {name} 失败: {e}")
+                    return name, {}
+
+        tasks = [_run_one(name, agent) for name, agent in self.agents.items()]
+        pairs = await asyncio.gather(*tasks)
+        agent_results = dict(pairs)
         self.analysis_results = agent_results
         return agent_results
         
-    def get_all_signals(self) -> List[Dict[str, Any]]:
-        """获取所有Agent的信号"""
-        signals = []
-        for agent_name, result in self.analysis_results.items():
-            if "signal" in result:
-                signals.append({
-                    "agent": agent_name,
-                    **result["signal"]
-                })
-        return signals
+    def get_all_signals(self) -> Dict[str, Dict[str, AgentSignal]]:
+        """获取所有 Agent 的信号"""
+        return self.analysis_results
         
     def get_agent_status(self) -> Dict[str, Any]:
-        """获取所有Agent状态"""
-        status = {}
-        for name, agent in self.agents.items():
-            status[name] = agent.get_status()
-        return status
+        """获取所有 Agent 状态"""
+        return {name: agent.get_status() for name, agent in self.agents.items()}
 
-# 全局Agent管理器
+
+# 全局 Agent 管理器
 agent_manager = AgentManager()

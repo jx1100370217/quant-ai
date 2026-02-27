@@ -86,28 +86,38 @@ export async function GET() {
     }
 
     const acct = data.Data[0]
+    // parseFloat(undefined/null/"") → NaN，用 || 0 防空
+    const safeFloat = (v: any, fallback = 0): number => {
+      const n = parseFloat(v)
+      return isNaN(n) ? fallback : n
+    }
+    const safeInt = (v: any, fallback = 0): number => {
+      const n = parseInt(v, 10)
+      return isNaN(n) ? fallback : n
+    }
+
     const positions = (acct.positions || []).map((p: any) => ({
       code: p.Zqdm,
-      name: p.Zqmc || p.zqzwqc,
-      shares: parseInt(p.Gfye),
-      availableShares: parseInt(p.Kysl),
-      cost: parseFloat(p.Cbjg),
-      current: parseFloat(p.Zxjg),
-      marketValue: parseFloat(p.Zxsz),
-      pnl: parseFloat(p.Ljyk),
-      pnlPct: parseFloat(p.Ykbl),
-      todayPnl: parseFloat(p.Dryk),
-      todayPnlPct: parseFloat(p.Drykbl),
+      name: p.Zqmc || p.zqzwqc || p.Zqdm,
+      shares: safeInt(p.Gfye),
+      availableShares: safeInt(p.Kysl),
+      cost: safeFloat(p.Cbjg),
+      current: safeFloat(p.Zxjg),
+      marketValue: safeFloat(p.Zxsz),
+      pnl: safeFloat(p.Ljyk),
+      pnlPct: safeFloat(p.Ykbl),
+      todayPnl: safeFloat(p.Dryk),
+      todayPnlPct: safeFloat(p.Drykbl),
     }))
 
     return NextResponse.json({
       success: true,
       data: {
-        cash: parseFloat(acct.Zjye),
-        totalAssets: parseFloat(acct.Zzc),
-        totalMarketValue: parseFloat(acct.Zxsz),
-        totalPnl: parseFloat(acct.Ljyk),
-        todayPnl: parseFloat(acct.Dryk),
+        cash: safeFloat(acct.Zjye),
+        totalAssets: safeFloat(acct.Zzc),
+        totalMarketValue: safeFloat(acct.Zxsz),
+        totalPnl: safeFloat(acct.Ljyk),
+        todayPnl: safeFloat(acct.Dryk),
         positions,
       },
       updatedAt: new Date().toISOString(),

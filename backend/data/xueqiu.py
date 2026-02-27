@@ -23,7 +23,7 @@ class XueqiuAPI:
         url = f"https://stock.xueqiu.com/v5/stock/realtime/quotec.json?symbol={','.join(xueqiu_codes)}"
         
         try:
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(trust_env=False) as session:
                 async with session.get(url, headers=self.headers) as resp:
                     data = await resp.json(content_type=None)
                     result = {}
@@ -61,7 +61,7 @@ class XueqiuAPI:
         url = f"https://stock.xueqiu.com/v5/stock/quote.json?symbol={symbol}"
         
         try:
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(trust_env=False) as session:
                 async with session.get(url, headers=self.headers) as resp:
                     data = await resp.json(content_type=None)
                     

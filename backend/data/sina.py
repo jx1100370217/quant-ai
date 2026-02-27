@@ -17,7 +17,7 @@ class SinaAPI:
                f"MoneyFlow.ssl_bkzj_bk?page=1&num=20&sort=netamount&asc=0&fenlei={sector_type}")
         
         try:
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(trust_env=False) as session:
                 async with session.get(url, headers=self.headers) as resp:
                     data = await resp.json(content_type=None)
                     result = []
@@ -48,7 +48,7 @@ class SinaAPI:
         url = f"https://hq.sinajs.cn/list={','.join(sina_codes)}"
         
         try:
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(trust_env=False) as session:
                 async with session.get(url, headers=self.headers) as resp:
                     text = await resp.text(encoding='gbk')
                     result = {}

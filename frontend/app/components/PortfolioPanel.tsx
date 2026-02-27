@@ -84,7 +84,11 @@ export default function PortfolioPanel() {
     )
   }
 
-  const { positions, totalAssets, totalMarketValue, totalPnl, todayPnl, cash } = portfolio
+  const { positions, cash } = portfolio
+  const totalAssets = portfolio.totalAssets ?? 0
+  const totalMarketValue = portfolio.totalMarketValue ?? 0
+  const totalPnl = portfolio.totalPnl ?? 0
+  const todayPnl = portfolio.todayPnl ?? 0
   const totalReturn = totalAssets > 0 ? (totalPnl / (totalAssets - totalPnl)) * 100 : 0
 
   const sorted = [...positions].sort((a, b) =>
@@ -139,8 +143,15 @@ export default function PortfolioPanel() {
           <div className="text-center text-gray-500 py-8 text-sm">暂无持仓</div>
         )}
         {sorted.map((p) => {
-          const isUp = p.pnl >= 0
-          const isTodayUp = p.todayPnl >= 0
+          // 防空值（API 可能返回 null/NaN）
+          const current    = p.current    ?? 0
+          const cost       = p.cost       ?? 0
+          const pnl        = p.pnl        ?? 0
+          const pnlPct     = p.pnlPct     ?? 0
+          const todayPnl   = p.todayPnl   ?? 0
+          const todayPnlPct = p.todayPnlPct ?? 0
+          const isUp = pnl >= 0
+          const isTodayUp = todayPnl >= 0
           return (
             <div key={p.code} className="p-3 rounded-lg bg-gray-900/30 hover:bg-gray-800/50 transition-colors border border-gray-800/50">
               <div className="flex justify-between items-center">
@@ -149,23 +160,23 @@ export default function PortfolioPanel() {
                   <div className="text-xs text-gray-500 font-mono">{p.code} · {p.shares}股 {p.availableShares < p.shares ? `(可卖${p.availableShares})` : ''}</div>
                 </div>
                 <div className="text-right">
-                  <div className="font-mono text-sm font-bold">{p.current.toFixed(3)}</div>
+                  <div className="font-mono text-sm font-bold">{current.toFixed(3)}</div>
                   <div className={`flex items-center justify-end text-xs font-mono ${isTodayUp ? 'text-neon-red' : 'text-neon-green'}`}>
                     {isTodayUp ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
-                    {(p.todayPnlPct * 100).toFixed(2)}%
+                    {(todayPnlPct * 100).toFixed(2)}%
                   </div>
                 </div>
               </div>
               <div className="mt-2 flex items-center justify-between text-xs">
-                <span className="text-gray-500">成本 {p.cost.toFixed(3)}</span>
+                <span className="text-gray-500">成本 {cost.toFixed(3)}</span>
                 <span className={`font-mono font-bold ${isUp ? 'text-neon-red' : 'text-neon-green'}`}>
-                  {isUp ? '+' : ''}{(p.pnl / 10000).toFixed(2)}万 ({isUp ? '+' : ''}{(p.pnlPct * 100).toFixed(1)}%)
+                  {isUp ? '+' : ''}{(pnl / 10000).toFixed(2)}万 ({isUp ? '+' : ''}{(pnlPct * 100).toFixed(1)}%)
                 </span>
               </div>
               <div className="mt-1 h-1 rounded-full bg-gray-800 overflow-hidden">
                 <div
                   className={`h-full rounded-full transition-all duration-500 ${isUp ? 'bg-gradient-to-r from-red-600 to-red-400' : 'bg-gradient-to-r from-green-600 to-green-400'}`}
-                  style={{ width: `${Math.min(Math.abs(p.pnlPct * 100) * 2, 100)}%` }}
+                  style={{ width: `${Math.min(Math.abs(pnlPct * 100) * 2, 100)}%` }}
                 />
               </div>
             </div>

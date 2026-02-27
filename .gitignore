@@ -20,3 +20,10 @@ Thumbs.db
 .vscode/
 .idea/
 *.swp
+
+# Logs
+logs/
+*.log
+
+# TypeScript build cache
+frontend/tsconfig.tsbuildinfo

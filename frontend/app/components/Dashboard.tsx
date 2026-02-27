@@ -279,8 +279,11 @@ export default function Dashboard() {
       addLog('RiskManager', '评估持仓风险...')
       await delay(400)
       if (portfolio) {
-        const positionRatio = (portfolio.totalMarketValue / portfolio.totalAssets * 100).toFixed(1)
-        const pnlPct = portfolio.totalAssets > 0 ? (portfolio.totalPnl / (portfolio.totalAssets - portfolio.totalPnl) * 100).toFixed(1) : '0.0'
+        const totalMV = portfolio.totalMarketValue ?? 0
+        const totalA = portfolio.totalAssets ?? 0
+        const totalP = portfolio.totalPnl ?? 0
+        const positionRatio = totalA > 0 ? (totalMV / totalA * 100).toFixed(1) : '0.0'
+        const pnlPct = totalA > 0 ? (totalP / (totalA - totalP) * 100).toFixed(1) : '0.0'
         addLog('RiskManager', `仓位: ${positionRatio}% | 总盈亏: ${Number(pnlPct) >= 0 ? '+' : ''}${pnlPct}% | 持仓集中度: ${holdings.length === 1 ? '单一持仓(高)' : '多元化'}`)
       }
       const sellCount = newSignals.filter(s => s.action === 'sell').length
@@ -342,9 +345,9 @@ export default function Dashboard() {
           {portfolio && (
             <div className="flex items-center space-x-1 text-xs">
               <span className="text-gray-500">总资产</span>
-              <span className="font-mono text-cyan-400">¥{(portfolio.totalAssets / 10000).toFixed(2)}万</span>
-              <span className={`font-mono ml-1 ${portfolio.totalPnl >= 0 ? 'text-red-400' : 'text-green-400'}`}>
-                ({portfolio.totalPnl >= 0 ? '+' : ''}{portfolio.totalPnl.toFixed(0)})
+              <span className="font-mono text-cyan-400">¥{((portfolio.totalAssets ?? 0) / 10000).toFixed(2)}万</span>
+              <span className={`font-mono ml-1 ${(portfolio.totalPnl ?? 0) >= 0 ? 'text-red-400' : 'text-green-400'}`}>
+                ({(portfolio.totalPnl ?? 0) >= 0 ? '+' : ''}{(portfolio.totalPnl ?? 0).toFixed(0)})
               </span>
             </div>
           )}
