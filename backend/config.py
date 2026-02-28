@@ -69,5 +69,9 @@ class Config:
     # 风险管理
     MAX_DRAWDOWN = 0.15       # 最大回撤15%
     VAR_CONFIDENCE = 0.95     # VaR置信度
-    
+
+    # Telegram 推送配置（可选）
+    TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "")
+
 config = Config()

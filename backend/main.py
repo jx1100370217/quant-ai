@@ -46,6 +46,7 @@ from strategies.mean_reversion import MeanReversionStrategy
 from strategies.sector_rotation import SectorRotationStrategy
 from strategies.multi_factor import MultiFactorStrategy
 from utils.helpers import format_number, calculate_returns, get_trading_dates
+from utils.telegram import notify_full_analysis, notify_market_picks, notify_holdings_analysis
 
 # 配置日志
 logging.basicConfig(level=logging.INFO)
@@ -276,13 +277,16 @@ async def run_full_analysis():
         
         # 保存到历史
         analysis_history.append(result)
-        
+
+        # 推送到 Telegram
+        await notify_full_analysis(result)
+
         # 广播到 WebSocket
         await manager.broadcast(json.dumps({
             "type": "analysis_complete",
             "data": result,
         }, default=str))
-        
+
         logger.info("全量分析完成！")
         
         return {
@@ -597,6 +601,10 @@ async def _do_market_picks(body: dict):
         }
         _PICKS_CACHE["ts"] = time.time()
         _PICKS_CACHE["result"] = result
+
+        # 推送到 Telegram
+        await notify_market_picks(result)
+
         return result
 
     except HTTPException:
@@ -654,13 +662,18 @@ async def analyze_holdings(body: dict):
                 elif isinstance(signal, dict):
                     serialized[agent_name][code] = signal
 
-        return {
+        result = {
             "success": True,
             "data": serialized,
             "agent_count": len(serialized),
             "stock_count": len(target_stocks),
             "timestamp": datetime.now().isoformat(),
         }
+
+        # 推送到 Telegram
+        await notify_holdings_analysis(result, holdings)
+
+        return result
 
     except Exception as e:
         logger.error(f"analyze-holdings 失败: {e}", exc_info=True)
