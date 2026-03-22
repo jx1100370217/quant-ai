@@ -7,6 +7,8 @@
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.104+-green)](https://fastapi.tiangolo.com)
 [![Claude](https://img.shields.io/badge/Claude-Sonnet_4.6-orange)](https://anthropic.com)
 
+[English](./README_EN.md) | [日本語](./README_JA.md) | [한국어](./README_KO.md)
+
 ---
 
 ## ✨ 核心功能
@@ -37,6 +39,33 @@
 ### 🏆 大师综合精选（全A股）
 从**全A股5500+只股票**净流入 Top30 中，量化预筛后交由16位大师分析，不受单一板块限制，选出全市场最受大师认可的标的。
 
+### 📅 周度选股顾问（NEW）
+全自动四阶段选股系统，目标：**下周5%盈利**。
+
+```
+全A股净流入 Top50 + 动量股 + 龙虎榜 + 板块领涨
+                    ↓
+        Phase 1: 宽选候选池（~100只）
+                    ↓
+        Phase 2: 多因子量化预筛（8-12只）
+          技术面: RSI/MACD/布林带/均线/成交量
+          资金面: 主力净流入率/连续净流入天数
+          基本面: PE/PB/市值流动性
+          动量面: 5日涨幅/20日动量
+                    ↓
+        Phase 3: 16位AI大师评审
+                    ↓
+        Phase 4: 综合评分 + LLM周报生成
+          综合评分 = 量化×0.3 + 大师共识×0.4 + 资金×0.2 + 技术×0.1
+                    ↓
+        ┌─────────────────────────┐
+        │  📊 Top 3-5 推荐股      │
+        │  目标价(+5%) / 止损(-3%) │
+        │  仓位建议 / 风险提示     │
+        │  大盘环境 / 策略要点     │
+        └─────────────────────────┘
+```
+
 ### 📊 持仓分析
 对当前持仓股票一键调用16位大师，每人独立给出 bullish/bearish/neutral 信号、置信度和推理，综合决策自动生成。
 
@@ -48,7 +77,7 @@
 ┌──────────────────────────────────────────────────┐
 │            Next.js 14 前端 (Bloomberg风格UI)       │
 │  MarketOverview │ AgentDecisions │ PortfolioPanel  │
-│  KLineChart     │ PnLChart       │ Dashboard       │
+│  WeeklyAdvisor  │ RiskGauge      │ Dashboard       │
 └───────────────────────┬──────────────────────────┘
                         │  REST API / WebSocket
 ┌───────────────────────▼──────────────────────────┐
@@ -62,9 +91,10 @@
 │  ├ 全A股筛选      │                                │
 │  └ 资金流向       │  LLM: Claude Sonnet 4.6        │
 ├──────────────────┤  并发: asyncio.to_thread × 4   │
-│   🔐 LLM层       │                                │
-│  llm/client.py   │  认证: API Key / OAuth Token   │
-│  支持结构化输出   │  模型: claude-sonnet-4-6       │
+│   🔐 LLM层       ├───────────────────────────────┤
+│  llm/client.py   │  📅 周度选股顾问                │
+│  支持结构化输出   │  宽选→量化预筛→大师评审→周报    │
+│  API Key/OAuth   │  多因子评分 + LLM综合分析        │
 └──────────────────┴───────────────────────────────┘
 ```
 
@@ -146,6 +176,13 @@ cd frontend && npm run dev
 | `/api/agents/market-picks` | POST | 全A股+板块双路精选（~40s） |
 | `/api/agents/decisions` | GET | 历史决策记录 |
 
+### 周度选股顾问
+
+| 接口 | 方法 | 说明 |
+|------|------|------|
+| `/api/weekly-advisor/generate` | POST | 生成本周选股报告（~2min） |
+| `/api/weekly-advisor/latest` | GET | 获取最新一期周报（当日缓存） |
+
 ### 持仓 & 信号
 
 | 接口 | 方法 | 说明 |
@@ -158,6 +195,7 @@ cd frontend && npm run dev
 
 ## 🎯 选股流程
 
+### 实时精选（交易时段）
 ```
 全A股净流入 Top30              热门板块 Top3 × 各取8只
         ↓                              ↓
@@ -176,7 +214,15 @@ cd frontend && npm run dev
               └─────────────────────┘
 ```
 
-**量化预评分维度**：主力净流入率、涨幅动量、PE合理区间(5-40x)、PB安全边际(<3)、市值流动性(20-500亿)
+### 周度选股（每周生成）
+```
+Phase 1 宽选 → Phase 2 量化预筛 → Phase 3 大师评审 → Phase 4 LLM周报
+  ~100只候选      8-12只精选        16位大师打分       Top 3-5 推荐
+                                                    + 目标价/止损价
+                                                    + 仓位/风险提示
+```
+
+**量化预评分维度**：主力净流入率、涨幅动量、PE合理区间(5-40x)、PB安全边际(<3)、市值流动性(20-500亿)、RSI/MACD/布林带技术信号
 
 ---
 
@@ -186,6 +232,7 @@ cd frontend && npm run dev
 |------|-----------|-----------|
 | 持仓分析(16Agent) | ~80s | **~30s** |
 | 全A股精选 | 超时(>120s) | **~40s** |
+| 周度选股报告 | — | **~2min** |
 | LLM模型 | claude-opus-4 | **claude-sonnet-4-6** |
 | LLM并发数 | 2 | **4** |
 
@@ -205,6 +252,10 @@ quant-ai/
 │   │   ├── technical_analyst.py
 │   │   ├── risk_manager.py
 │   │   └── ...（共16个）
+│   ├── weekly_advisor/         # 📅 周度选股顾问模块
+│   │   ├── advisor.py          # 核心顾问（四阶段选股流程）
+│   │   ├── screener.py         # 量化筛选器（多因子打分）
+│   │   └── models.py           # Pydantic数据模型
 │   ├── llm/
 │   │   └── client.py           # LLM客户端（API Key / OAuth双模式）
 │   ├── models/
@@ -216,10 +267,10 @@ quant-ai/
 │   ├── app/
 │   │   ├── components/
 │   │   │   ├── AgentDecisions.tsx   # 大师决策面板 + 精选卡片
+│   │   │   ├── WeeklyAdvisor.tsx    # 📅 周度选股顾问面板
 │   │   │   ├── PortfolioPanel.tsx   # 持仓概览
 │   │   │   ├── MarketOverview.tsx   # 市场行情
-│   │   │   ├── KLineChart.tsx       # K线图(Recharts)
-│   │   │   └── Dashboard.tsx        # 分析日志面板
+│   │   │   └── Dashboard.tsx        # 主仪表盘
 │   │   └── api/                     # Next.js API路由（代理后端）
 │   └── package.json
 └── scripts/

@@ -131,18 +131,8 @@ async def send_messages(messages: List[str]) -> None:
 # 公共：生成单股大师详情块
 # ─────────────────────────────────────────────
 
-def _master_detail_block(
-    code: str,
-    name: str,
-    agent_signals: Dict[str, Any],
-    ts: str = "",
-    header_extra: str = "",
-) -> str:
-    """
-    为单只股票生成包含全部大师分析的消息块。
-    agent_signals: { agent_name: { signal, confidence, reasoning } }
-    """
-    # 统计
+def _stock_stats(agent_signals: Dict[str, Any]) -> tuple:
+    """返回 (bullish, bearish, neutral, avg_confidence, dominant_signal)"""
     bullish = bearish = neutral = 0
     total_conf = 0
     n = 0
@@ -156,6 +146,46 @@ def _master_detail_block(
         n += 1
     avg_c = round(total_conf / n, 1) if n else 0
     dominant = "bullish" if bullish >= bearish else ("bearish" if bearish > neutral else "neutral")
+    return bullish, bearish, neutral, avg_c, dominant
+
+
+def _compact_master_line(agent_signals: Dict[str, Any]) -> str:
+    """生成紧凑的大师信号行，如：🟢巴菲特 🔴伯里 🟡芒格 ..."""
+    # 短名映射
+    SHORT_NAME = {
+        "TechnicalAnalyst": "技术", "FundamentalAnalyst": "基本面",
+        "SentimentAnalyst": "情绪", "RiskManager": "风控",
+        "WarrenBuffett": "巴菲特", "CharlieMunger": "芒格",
+        "BenGraham": "格雷厄姆", "MichaelBurry": "伯里",
+        "MohnishPabrai": "帕伯莱", "PeterLynch": "林奇",
+        "CathieWood": "伍德", "PhilFisher": "费雪",
+        "RakeshJhunjhunwala": "君君瓦拉", "AswathDamodaran": "达摩达兰",
+        "StanleyDruckenmiller": "德鲁肯", "BillAckman": "阿克曼",
+    }
+    parts = []
+    for agent_name in AGENT_DISPLAY:
+        sig = agent_signals.get(agent_name)
+        if not sig:
+            continue
+        s = sig.get("signal", "neutral") if isinstance(sig, dict) else "neutral"
+        emoji = SIGNAL_EMOJI.get(s, "⚪")
+        short = SHORT_NAME.get(agent_name, agent_name)
+        parts.append(f"{emoji}{short}")
+    return " ".join(parts)
+
+
+def _master_detail_block(
+    code: str,
+    name: str,
+    agent_signals: Dict[str, Any],
+    ts: str = "",
+    header_extra: str = "",
+) -> str:
+    """
+    为单只股票生成包含全部大师分析的消息块。
+    agent_signals: { agent_name: { signal, confidence, reasoning } }
+    """
+    bullish, bearish, neutral, avg_c, dominant = _stock_stats(agent_signals)
 
     lines = [
         f"{SIGNAL_EMOJI.get(dominant,'⚪')} <b>{name}（{code}）</b>{header_extra}",
@@ -188,17 +218,12 @@ def _master_detail_block(
 
 def format_full_analysis(result: Dict[str, Any]) -> List[str]:
     """
-    /api/analysis/run 推送
-    第1条：决策汇总
-    后续每只股票：16大师详情
+    /api/analysis/run 推送 — 合并为单条消息
     """
     decisions:    Dict[str, Any] = result.get("portfolio_decisions", {})
     agent_signals_all: Dict[str, Any] = result.get("agent_signals", {})
     ts = result.get("timestamp", "")[:16].replace("T", " ")
 
-    messages = []
-
-    # ── 第1条：决策汇总 ──
     lines = [
         "📊 <b>QuantAI · 全量分析完成</b>",
         f"🕐 {ts}",
@@ -206,34 +231,36 @@ def format_full_analysis(result: Dict[str, Any]) -> List[str]:
     ]
     if not decisions:
         lines.append("⚠️ 暂无决策结果")
-    else:
-        for code, d in decisions.items():
-            action = d.get("action", "hold")
-            conf   = d.get("confidence", 0)
-            emoji  = ACTION_EMOJI.get(action, "⚪")
-            lines.append(f"{emoji} <b>{code}</b>  {action.upper()}  {conf}%")
-    messages.append("\n".join(lines))
+        return ["\n".join(lines)]
 
-    # ── 后续：每只股票的16大师详情 ──
-    # agent_signals_all 结构: { agent_name: { stock_code: {signal,confidence,reasoning} } }
-    # 转置为 { stock_code: { agent_name: {signal,confidence,reasoning} } }
+    # 转置 agent_signals
     per_stock: Dict[str, Dict[str, Any]] = {}
     for agent_name, signals in agent_signals_all.items():
         for code, sig in signals.items():
             per_stock.setdefault(code, {})[agent_name] = sig
 
-    for code, agent_sigs in per_stock.items():
-        d = decisions.get(code, {})
-        action  = d.get("action", "hold")
-        conf    = d.get("confidence", 0)
-        reason  = d.get("reasoning", d.get("reason", ""))
-        header  = f"  →  {ACTION_EMOJI.get(action,'⚪')} {action.upper()} {conf}%"
-        block   = _master_detail_block(code, code, agent_sigs, ts="", header_extra=header)
-        if reason:
-            block += f"\n\n📝 <b>PM决策：</b><i>{str(reason)[:150]}</i>"
-        messages.append(block)
+    # 每只股票：决策 + 统计 + 紧凑大师信号
+    for code, d in decisions.items():
+        action = d.get("action", "hold")
+        conf   = d.get("confidence", 0)
+        reason = d.get("reasoning", d.get("reason", ""))
+        emoji  = ACTION_EMOJI.get(action, "⚪")
+        agent_sigs = per_stock.get(code, {})
+        b, br, neu, avg_c, dominant = _stock_stats(agent_sigs)
 
-    return messages
+        lines.append(f"{emoji} <b>{code}</b>  {action.upper()} {conf}%  "
+                      f"(多{b}/空{br}/中{neu} 置信{avg_c:.0f}%)")
+        if reason:
+            lines.append(f"   📝 <i>{str(reason)[:120]}</i>")
+        if agent_sigs:
+            lines.append(f"   {_compact_master_line(agent_sigs)}")
+        lines.append("")
+
+    text = "\n".join(lines).strip()
+    # 如果超过 4000 字符，拆分为多条
+    if len(text) <= 4000:
+        return [text]
+    return [text[:4000] + "\n…"]
 
 
 # ─────────────────────────────────────────────
@@ -242,10 +269,7 @@ def format_full_analysis(result: Dict[str, Any]) -> List[str]:
 
 def format_market_picks(result: Dict[str, Any]) -> List[str]:
     """
-    /api/agents/market-picks 推送
-    第1条：摘要
-    第2条：板块精选16大师详情
-    第3条：大师精选16大师详情
+    /api/agents/market-picks 推送 — 合并为单条消息
     """
     ts          = result.get("timestamp", "")[:16].replace("T", " ")
     sector_name = result.get("sector_name", "")
@@ -253,12 +277,9 @@ def format_market_picks(result: Dict[str, Any]) -> List[str]:
     sector_pick = result.get("sector_pick", {})
     master_pick = result.get("master_pick", {})
 
-    messages = []
-
-    # ── 第1条：摘要 ──
-    def _summary_line(label: str, pick: dict) -> str:
+    def _pick_block(label: str, emoji: str, pick: dict) -> list:
         if not pick:
-            return f"{label}：无"
+            return [f"{emoji} {label}：无"]
         n    = pick.get("name", "")
         code = pick.get("code", "")
         b    = pick.get("bullish", 0)
@@ -268,38 +289,25 @@ def format_market_picks(result: Dict[str, Any]) -> List[str]:
         pr   = pick.get("price", 0)
         ch   = pick.get("change_pct", 0)
         arr  = "▲" if ch >= 0 else "▼"
-        return (f"<b>{label}：{n}（{code}）</b>  {pr:.2f} {arr}{abs(ch):.2f}%\n"
-                f"   看多 {b} 看空 {brr} 中性 {neu}  置信度 {ac:.1f}%")
+        lines = [
+            f"{emoji} <b>{label}：{n}（{code}）</b>  {pr:.2f} {arr}{abs(ch):.2f}%",
+            f"   多{b}/空{brr}/中{neu}  置信{ac:.0f}%",
+        ]
+        sigs = pick.get("agent_signals", {})
+        if sigs:
+            lines.append(f"   {_compact_master_line(sigs)}")
+        return lines
 
-    summary = [
+    lines = [
         "🔍 <b>QuantAI · 选股推荐完成</b>",
-        f"🕐 {ts}   候选 {cnt} 只   热门板块：{sector_name}",
+        f"🕐 {ts}   候选 {cnt} 只   板块：{sector_name}",
         "",
-        _summary_line("🏆 板块精选", sector_pick),
-        "",
-        _summary_line("🌟 大师精选", master_pick),
     ]
-    messages.append("\n".join(summary))
+    lines.extend(_pick_block("板块精选", "🏆", sector_pick))
+    lines.append("")
+    lines.extend(_pick_block("大师精选", "🌟", master_pick))
 
-    # ── 板块精选16大师详情 ──
-    if sector_pick:
-        sigs = sector_pick.get("agent_signals", {})
-        code = sector_pick.get("code", "")
-        name = sector_pick.get("name", code)
-        block = _master_detail_block(code, name, sigs,
-                                     header_extra=f"  ← 板块精选  板块：{sector_pick.get('sector_name','')}")
-        messages.append("🏆 <b>板块精选 · 16大师分析</b>\n\n" + block)
-
-    # ── 大师精选16大师详情 ──
-    if master_pick:
-        sigs = master_pick.get("agent_signals", {})
-        code = master_pick.get("code", "")
-        name = master_pick.get("name", code)
-        block = _master_detail_block(code, name, sigs,
-                                     header_extra=f"  ← 大师精选  净流入 {master_pick.get('net_inflow',0)/1e8:+.2f}亿")
-        messages.append("🌟 <b>大师精选 · 16大师分析</b>\n\n" + block)
-
-    return messages
+    return ["\n".join(lines)]
 
 
 # ─────────────────────────────────────────────
@@ -308,9 +316,7 @@ def format_market_picks(result: Dict[str, Any]) -> List[str]:
 
 def format_holdings_analysis(result: Dict[str, Any], holdings: list) -> List[str]:
     """
-    /api/agents/analyze-holdings 推送
-    第1条：持仓汇总
-    后续每只股票：16大师详情（单独一条）
+    /api/agents/analyze-holdings 推送 — 合并为单条消息
     """
     ts          = result.get("timestamp", "")[:16].replace("T", " ")
     data        = result.get("data", {})
@@ -325,40 +331,26 @@ def format_holdings_analysis(result: Dict[str, Any], holdings: list) -> List[str
 
     name_map = {h.get("code", ""): h.get("name", h.get("code", "")) for h in holdings}
 
-    messages = []
-
-    # ── 第1条：汇总 ──
-    summary_lines = [
+    lines = [
         "📋 <b>QuantAI · 持仓分析完成</b>",
         f"🕐 {ts}   {stock_count} 只股票 × {agent_count} 位大师",
         "",
     ]
+
     for code, agent_sigs in per_stock.items():
-        b = brr = neu = total_c = 0
-        n = 0
-        for sig in agent_sigs.values():
-            s = sig.get("signal", "neutral") if isinstance(sig, dict) else "neutral"
-            c = sig.get("confidence", 0)     if isinstance(sig, dict) else 0
-            if s == "bullish":   b   += 1
-            elif s == "bearish": brr += 1
-            else:                neu += 1
-            total_c += c; n += 1
-        avg_c = round(total_c / n, 1) if n else 0
-        dominant = "bullish" if b >= brr else ("bearish" if brr > neu else "neutral")
+        b, brr, neu, avg_c, dominant = _stock_stats(agent_sigs)
         nm = name_map.get(code, code)
-        summary_lines.append(
+        lines.append(
             f"{SIGNAL_EMOJI.get(dominant,'⚪')} <b>{nm}（{code}）</b>"
-            f"  看多 {b} 看空 {brr} 中性 {neu}  置信度 {avg_c:.1f}%"
+            f"  多{b}/空{brr}/中{neu}  置信{avg_c:.0f}%"
         )
-    messages.append("\n".join(summary_lines))
+        lines.append(f"   {_compact_master_line(agent_sigs)}")
+        lines.append("")
 
-    # ── 每只股票：16大师详情 ──
-    for code, agent_sigs in per_stock.items():
-        nm    = name_map.get(code, code)
-        block = _master_detail_block(code, nm, agent_sigs)
-        messages.append(f"📋 <b>{nm}（{code}）· 16大师详情</b>\n\n" + block)
-
-    return messages
+    text = "\n".join(lines).strip()
+    if len(text) <= 4000:
+        return [text]
+    return [text[:4000] + "\n…"]
 
 
 # ─────────────────────────────────────────────

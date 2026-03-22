@@ -47,6 +47,7 @@ from strategies.sector_rotation import SectorRotationStrategy
 from strategies.multi_factor import MultiFactorStrategy
 from utils.helpers import format_number, calculate_returns, get_trading_dates
 from utils.telegram import notify_full_analysis, notify_market_picks, notify_holdings_analysis
+from weekly_advisor.advisor import WeeklyAdvisor
 
 # 配置日志
 logging.basicConfig(level=logging.INFO)
@@ -119,6 +120,9 @@ agent_mgr.register_agent(rakesh_jhunjhunwala)
 agent_mgr.register_agent(aswath_damodaran)
 agent_mgr.register_agent(stanley_druckenmiller)
 agent_mgr.register_agent(bill_ackman)
+
+# 初始化周度选股顾问
+weekly_advisor = WeeklyAdvisor(agent_manager=agent_mgr)
 
 # 初始化策略（保留，用于兼容）
 momentum_strategy = MomentumStrategy()
@@ -678,6 +682,50 @@ async def analyze_holdings(body: dict):
     except Exception as e:
         logger.error(f"analyze-holdings 失败: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/weekly-advisor/generate")
+async def generate_weekly_picks():
+    """
+    生成本周选股建议报告（四阶段：宽选→量化预筛→AI大师评审→LLM周报）
+    - 包含并发锁，防止重复调用
+    - 同日内结果会被缓存复用
+    """
+    try:
+        logger.info("收到周度选股请求，启动 WeeklyAdvisor...")
+        report = await weekly_advisor.generate_weekly_picks()
+        return {
+            "success": True,
+            "data": report.model_dump(),
+            "timestamp": datetime.now().isoformat(),
+        }
+    except Exception as e:
+        logger.error(f"周度选股生成失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/weekly-advisor/latest")
+async def get_latest_weekly_report():
+    """
+    获取最新一期周报（同日内直接返回缓存，无需重新运行）
+    如果当天尚未生成，返回 404
+    """
+    from weekly_advisor.advisor import _REPORT_CACHE
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    if _REPORT_CACHE["date"] == today_str and _REPORT_CACHE["report"] is not None:
+        return {
+            "success": True,
+            "data": _REPORT_CACHE["report"].model_dump(),
+            "from_cache": True,
+            "timestamp": datetime.now().isoformat(),
+        }
+    return JSONResponse(
+        status_code=404,
+        content={
+            "success": False,
+            "message": f"今日（{today_str}）尚未生成周度选股报告，请先调用 POST /api/weekly-advisor/generate",
+        }
+    )
 
 
 @app.get("/api/agents/decisions")

@@ -1,16 +1,14 @@
 'use client'
 
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { Activity, TrendingUp, Brain, Shield, Clock } from 'lucide-react'
 import MarketOverview from './MarketOverview'
 import SectorFlow from './SectorFlow'
 import PortfolioPanel from './PortfolioPanel'
 import AgentDecisions from './AgentDecisions'
-import TradeSignals, { TradeSignal } from './TradeSignals'
-import KLineChart from './KLineChart'
-import PnLChart from './PnLChart'
 import RiskGauge from './RiskGauge'
 import AgentChat, { LogEntry } from './AgentChat'
+import WeeklyAdvisor from './WeeklyAdvisor'
 
 export interface HoldingItem {
   code: string
@@ -55,19 +53,10 @@ export default function Dashboard() {
 
   // 分析状态
   const [logs, setLogs] = useState<LogEntry[]>([])
-  const [signals, setSignals] = useState<TradeSignal[]>([])
+
   const [analysisRunning, setAnalysisRunning] = useState(false)
 
-  // 图表联动状态
-  const [selectedStock, setSelectedStock] = useState<{ code: string; name: string; cost: number } | null>(null)
-  // 用 ref 保证 handleSelectStock 总能拿到最新 holdings
-  const holdingsRef = useRef<HoldingItem[]>([])
-  useEffect(() => { holdingsRef.current = holdings }, [holdings])
 
-  const handleSelectStock = useCallback((code: string, name: string) => {
-    const h = holdingsRef.current.find(h => h.code === code)
-    setSelectedStock({ code, name, cost: h?.cost ?? 0 })
-  }, [])
 
   // 拉取真实持仓
   const fetchPortfolio = useCallback(async () => {
@@ -93,10 +82,7 @@ export default function Dashboard() {
         })
         setPortfolioError(null)
         // 默认选中第一只（用函数式更新避免依赖 selectedStock 旧值）
-        setSelectedStock(prev => prev ?? (items.length > 0
-          ? { code: items[0].code, name: items[0].name, cost: items[0].cost }
-          : null
-        ))
+
       } else {
         setPortfolioError(data.error || '获取持仓失败')
       }
@@ -147,8 +133,7 @@ export default function Dashboard() {
     }
     setAnalysisRunning(true)
     setLogs([])
-    setSignals([])
-    const newSignals: TradeSignal[] = []
+    const newSignals: Array<{time:string;stock:string;code:string;action:'buy'|'sell'|'hold';confidence:number;reason:string}> = []
 
     try {
       addLog('SYSTEM', `🚀 启动全量分析 (持仓 ${holdings.length} 只)...`)
@@ -310,7 +295,6 @@ export default function Dashboard() {
         }
       }
 
-      setSignals(newSignals)
       setLastUpdate(now())
       addLog('SYSTEM', `✅ 分析完成，生成 ${newSignals.length} 条信号`)
 
@@ -378,8 +362,8 @@ export default function Dashboard() {
             <div className="lg:col-span-2">
               <AgentDecisions
                 holdings={holdings}
-                selectedCode={selectedStock?.code ?? null}
-                onSelectStock={handleSelectStock}
+                selectedCode={null}
+                onSelectStock={() => {}}
               />
             </div>
             <div>
@@ -387,19 +371,10 @@ export default function Dashboard() {
             </div>
           </div>
 
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            <KLineChart
-              stockCode={selectedStock?.code}
-              stockName={selectedStock?.name}
-            />
-            <PnLChart
-              stockCode={selectedStock?.code}
-              stockName={selectedStock?.name}
-              cost={selectedStock?.cost}
-            />
-          </div>
 
-          <TradeSignals signals={signals} />
+
+          {/* 周度选股顾问 */}
+          <WeeklyAdvisor />
         </div>
 
         {/* 右侧边栏 */}
