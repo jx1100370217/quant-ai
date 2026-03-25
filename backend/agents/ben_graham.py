@@ -70,7 +70,7 @@ class BenGraham(BaseAgent):
             prompt=prompt,
             pydantic_model=BatchSignals,
             system_prompt=GRAHAM_SYSTEM,
-            max_tokens=1200,
+            max_tokens=200000,
             default_factory=lambda: BatchSignals(signals={
                 code: AgentSignal(signal="neutral", confidence=30, reasoning="价值分析暂时不可用")
                 for code in all_data

@@ -135,7 +135,15 @@ def call_llm(
 
                 for block in response.content:
                     if block.type == "tool_use" and block.name == tool_name:
-                        return pydantic_model.model_validate(block.input)
+                        input_data = block.input
+                        # 防护：LLM 偶尔返回空对象 {} 或数据不完整
+                        if not input_data or (isinstance(input_data, dict) and len(input_data) == 0):
+                            logger.warning(f"LLM tool_use 返回空对象 (attempt {attempt + 1}), "
+                                          f"stop_reason={response.stop_reason}, "
+                                          f"model={response.model}, "
+                                          f"usage=in:{response.usage.input_tokens}/out:{response.usage.output_tokens}")
+                            break  # 跳到重试
+                        return pydantic_model.model_validate(input_data)
 
                 # fallback: 从 text 解析
                 for block in response.content:

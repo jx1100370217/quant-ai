@@ -171,7 +171,7 @@ PE TTM: {c.pe_ttm or 'N/A'}  PB: {c.pb or 'N/A'}  市值: {c.market_cap_b or 'N/
             prompt=prompt,
             pydantic_model=LLMWeeklyOutput,
             system_prompt="你是一位专业的A股量化投资顾问，擅长综合量化因子和基本面分析，生成高质量的选股周报。",
-            max_tokens=4096,
+            max_tokens=200000,
             temperature=0.3,
         )
         return output

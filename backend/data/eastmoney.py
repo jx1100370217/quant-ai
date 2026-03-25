@@ -15,11 +15,55 @@ _QUOTE_CACHE: Dict[str, tuple] = {}   # {code: (timestamp, data)}
 _SECTOR_CACHE: tuple = (0, None)      # (timestamp, data)
 _CACHE_TTL = 60                        # 60 秒内复用缓存
 
-def _make_session() -> aiohttp.ClientSession:
+_SHARED_SESSION: Optional[aiohttp.ClientSession] = None
+_REQUEST_SEMAPHORE: Optional[asyncio.Semaphore] = None
+
+
+def _create_raw_session() -> aiohttp.ClientSession:
     """创建不走代理的 aiohttp session（解决本地代理干扰问题）"""
-    connector = aiohttp.TCPConnector(force_close=True)
-    timeout = aiohttp.ClientTimeout(total=15)  # 增加到15s，避免并发高峰超时
+    connector = aiohttp.TCPConnector(
+        force_close=False,    # 复用TCP连接，避免频繁握手导致 Server disconnected
+        limit=10,             # 同一 host 最大连接数
+        limit_per_host=6,     # 单 host 限制
+        enable_cleanup_closed=True,
+    )
+    timeout = aiohttp.ClientTimeout(total=20)
     return aiohttp.ClientSession(trust_env=False, connector=connector, timeout=timeout)
+
+
+def _get_shared_session() -> aiohttp.ClientSession:
+    """获取或创建全局共享的 aiohttp session（复用TCP连接池）"""
+    global _SHARED_SESSION
+    if _SHARED_SESSION is None or _SHARED_SESSION.closed:
+        _SHARED_SESSION = _create_raw_session()
+    return _SHARED_SESSION
+
+
+def _get_semaphore() -> asyncio.Semaphore:
+    """获取或创建全局请求信号量（限制并发请求数）"""
+    global _REQUEST_SEMAPHORE
+    if _REQUEST_SEMAPHORE is None:
+        _REQUEST_SEMAPHORE = asyncio.Semaphore(6)
+    return _REQUEST_SEMAPHORE
+
+
+class _SharedSessionCtx:
+    """
+    兼容 async with _make_session() as session: 语法的包装器。
+    使用共享 session + 信号量限流，不会在退出时关闭 session。
+    """
+    async def __aenter__(self) -> aiohttp.ClientSession:
+        self._sem = _get_semaphore()
+        await self._sem.acquire()
+        return _get_shared_session()
+
+    async def __aexit__(self, *args):
+        self._sem.release()
+
+
+def _make_session() -> _SharedSessionCtx:
+    """返回共享 session 上下文管理器（限流 + 连接复用）"""
+    return _SharedSessionCtx()
 
 
 class EastmoneyAPI:
@@ -120,9 +164,72 @@ class EastmoneyAPI:
                     _QUOTE_CACHE[code] = (time.time(), result)   # 写入缓存
                     return result
         except Exception as e:
-            logger.warning(f"获取股票行情失败 {code}: {e}")
+            logger.debug(f"东财行情获取失败 {code}: {e}，尝试新浪备选")
+
+        # ── 东财失败：fallback 到新浪行情 API ──────────────
+        result = await self._quote_from_sina(code)
+        if result:
+            _QUOTE_CACHE[code] = (time.time(), result)
+        return result
+
+    async def _quote_from_sina(self, code: str) -> Optional[Dict]:
+        """从新浪获取个股实时行情（东财的备选）"""
+        symbol = self._sina_symbol(code)
+        url = f"https://hq.sinajs.cn/list={symbol}"
+        try:
+            async with _make_session() as session:
+                async with session.get(url, headers={
+                    'User-Agent': 'Mozilla/5.0',
+                    'Referer': 'https://finance.sina.com.cn/',
+                }) as resp:
+                    text = await resp.text(encoding='gbk')
+                    if not text or '=""' in text:
+                        return None
+                    # 解析格式: var hq_str_sz000791="名称,今开,昨收,当前价,最高,最低,买一,卖一,成交量(股),成交额(元),..."
+                    parts_start = text.find('"')
+                    parts_end = text.rfind('"')
+                    if parts_start < 0 or parts_end <= parts_start:
+                        return None
+                    fields = text[parts_start + 1:parts_end].split(',')
+                    if len(fields) < 32:
+                        return None
+                    name       = fields[0]
+                    open_price = float(fields[1]) if fields[1] else 0
+                    pre_close  = float(fields[2]) if fields[2] else 0
+                    price      = float(fields[3]) if fields[3] else 0
+                    high       = float(fields[4]) if fields[4] else price
+                    low        = float(fields[5]) if fields[5] else price
+                    volume     = int(float(fields[8])) if fields[8] else 0  # 股
+                    amount     = float(fields[9]) if fields[9] else 0       # 元
+                    if price == 0 or pre_close == 0:
+                        return None
+                    change     = round(price - pre_close, 4)
+                    change_pct = round(change / pre_close * 100, 2)
+                    amplitude  = round((high - low) / pre_close * 100, 2) if pre_close else 0
+                    return {
+                        "code": code.split(".")[0],
+                        "name": name,
+                        "price": price,
+                        "high": high,
+                        "low": low,
+                        "open": open_price,
+                        "pre_close": pre_close,
+                        "volume": volume // 100,  # 转为手
+                        "amount": amount,
+                        "turnover_rate": None,     # 新浪不直接提供
+                        "change_pct": change_pct,
+                        "change": change,
+                        "amplitude": amplitude,
+                        "pe": None,                # 新浪行情不含 PE/PB
+                        "pe_ttm": None,
+                        "pb": None,
+                        "market_cap_b": None,
+                        "float_market_cap_b": None,
+                    }
+        except Exception as e:
+            logger.warning(f"新浪行情获取失败 {code}: {e}")
             return None
-            
+
     async def get_batch_quotes(self, codes: List[str]) -> Dict[str, Dict]:
         """批量获取行情"""
         # 构建secids
@@ -154,6 +261,11 @@ class EastmoneyAPI:
     async def get_kline_data(self, code: str, klt: str = "101", limit: int = 100) -> List[Dict]:
         """获取K线数据（含 60s 缓存）
         klt: 101=日K, 102=周K, 103=月K, 1/5/15/30/60=分钟K
+
+        数据源优先级：
+        1. 新浪财经 K 线 API（稳定可靠）
+        2. 腾讯 K 线 API（备选）
+        3. 东财 push2his（已被反爬限制，作为最终 fallback）
         """
         cache_key = f"kline_{code}_{klt}_{limit}"
         now = time.time()
@@ -162,22 +274,144 @@ class EastmoneyAPI:
             if now - ts < _CACHE_TTL:
                 return cached
 
+        # 尝试新浪 → 腾讯 → 东财，成功即返回
+        result = await self._kline_from_sina(code, klt, limit)
+        if not result:
+            result = await self._kline_from_tencent(code, klt, limit)
+        if not result:
+            result = await self._kline_from_eastmoney(code, klt, limit)
+
+        if result:
+            _QUOTE_CACHE[cache_key] = (time.time(), result)
+        return result
+
+    def _sina_symbol(self, code: str) -> str:
+        """转换股票代码为新浪格式：sz000791 / sh600519"""
+        pure = code.split(".")[0]
+        if pure.startswith(("6", "5", "688")):
+            return f"sh{pure}"
+        return f"sz{pure}"
+
+    def _tencent_symbol(self, code: str) -> str:
+        """转换股票代码为腾讯格式：sz000791 / sh600519"""
+        return self._sina_symbol(code)  # 格式相同
+
+    async def _kline_from_sina(self, code: str, klt: str, limit: int) -> List[Dict]:
+        """从新浪财经获取 K 线数据"""
+        # klt 转换：101=日K(scale=240), 102=周K(scale=1200), 103=月K(scale=7200)
+        scale_map = {"101": "240", "102": "1200", "103": "7200",
+                     "1": "1", "5": "5", "15": "15", "30": "30", "60": "60"}
+        scale = scale_map.get(klt, "240")
+        symbol = self._sina_symbol(code)
+
+        url = (f"https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/"
+               f"CN_MarketData.getKLineData"
+               f"?symbol={symbol}&scale={scale}&ma=no&datalen={limit}")
+        try:
+            async with _make_session() as session:
+                async with session.get(url, headers={
+                    'User-Agent': 'Mozilla/5.0',
+                    'Referer': 'https://finance.sina.com.cn/',
+                }) as resp:
+                    text = await resp.text()
+                    if not text or text.strip() == 'null':
+                        return []
+                    import json as _json
+                    data = _json.loads(text)
+                    if not isinstance(data, list):
+                        return []
+                    result = []
+                    prev_close = None
+                    for item in data:
+                        o = float(item["open"])
+                        c = float(item["close"])
+                        h = float(item["high"])
+                        l = float(item["low"])
+                        v = int(item.get("volume", 0))
+                        # 计算衍生字段
+                        base = prev_close if prev_close else o
+                        change = round(c - base, 4)
+                        change_pct = round(change / base * 100, 2) if base > 0 else 0
+                        amplitude = round((h - l) / base * 100, 2) if base > 0 else 0
+                        result.append({
+                            "date": item["day"].split(" ")[0],  # 去掉时间部分
+                            "open": o, "close": c, "high": h, "low": l,
+                            "volume": v,
+                            "amount": 0.0,  # 新浪不提供成交额
+                            "amplitude": amplitude,
+                            "change_pct": change_pct,
+                            "change": change,
+                            "turnover": 0.0,
+                        })
+                        prev_close = c
+                    return result
+        except Exception as e:
+            logger.debug(f"新浪K线获取失败 {code}: {e}")
+            return []
+
+    async def _kline_from_tencent(self, code: str, klt: str, limit: int) -> List[Dict]:
+        """从腾讯获取 K 线数据（备选）"""
+        if klt not in ("101", "102"):
+            return []  # 腾讯仅支持日K/周K
+        period = "day" if klt == "101" else "week"
+        symbol = self._tencent_symbol(code)
+
+        url = (f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
+               f"?param={symbol},{period},,,{limit},qfq")
+        try:
+            async with _make_session() as session:
+                async with session.get(url, headers={
+                    'User-Agent': 'Mozilla/5.0',
+                    'Referer': 'https://web.sqt.gtimg.cn/',
+                }) as resp:
+                    data = await resp.json(content_type=None)
+                    if data.get("code") != 0:
+                        return []
+                    stock_data = data.get("data", {}).get(symbol, {})
+                    klines = stock_data.get("qfqday" if period == "day" else "qfqweek", [])
+                    if not klines:
+                        return []
+                    result = []
+                    prev_close = None
+                    for k in klines:
+                        # 格式: [日期, 开, 收, 高, 低, 成交量]
+                        if len(k) < 6:
+                            continue
+                        o, c, h, l = float(k[1]), float(k[2]), float(k[3]), float(k[4])
+                        v = int(float(k[5]) * 100) if k[5] else 0  # 腾讯成交量单位是手
+                        base = prev_close if prev_close else o
+                        change = round(c - base, 4)
+                        change_pct = round(change / base * 100, 2) if base > 0 else 0
+                        amplitude = round((h - l) / base * 100, 2) if base > 0 else 0
+                        result.append({
+                            "date": k[0],
+                            "open": o, "close": c, "high": h, "low": l,
+                            "volume": v, "amount": 0.0,
+                            "amplitude": amplitude,
+                            "change_pct": change_pct,
+                            "change": change,
+                            "turnover": 0.0,
+                        })
+                        prev_close = c
+                    return result
+        except Exception as e:
+            logger.debug(f"腾讯K线获取失败 {code}: {e}")
+            return []
+
+    async def _kline_from_eastmoney(self, code: str, klt: str, limit: int) -> List[Dict]:
+        """从东财获取 K 线数据（最终 fallback）"""
         secid = self._parse_secid(code)
-        
         url = (f"https://push2his.eastmoney.com/api/qt/stock/kline/get"
                f"?secid={secid}&fields1=f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11"
                f"&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61"
                f"&klt={klt}&fqt=1&end=20500101&lmt={limit}&ut={self.ut}")
-        
         try:
             async with _make_session() as session:
                 async with session.get(url, headers=self.headers) as resp:
                     data = await resp.json(content_type=None)
-
                     result = []
                     if data.get("rc") == 0 and data.get("data", {}).get("klines"):
                         for kline in data["data"]["klines"]:
-                            # 格式: "日期,开盘,收盘,最高,最低,成交量,成交额,振幅,涨跌幅,涨跌额,换手率"
                             parts = kline.split(",")
                             if len(parts) >= 11:
                                 result.append({
@@ -191,12 +425,11 @@ class EastmoneyAPI:
                                     "amplitude": float(parts[7]),
                                     "change_pct": float(parts[8]),
                                     "change": float(parts[9]),
-                                    "turnover": float(parts[10]) if parts[10] else 0
+                                    "turnover": float(parts[10]) if parts[10] else 0,
                                 })
-                    _QUOTE_CACHE[cache_key] = (time.time(), result)  # 写入缓存
                     return result
         except Exception as e:
-            logger.warning(f"获取K线数据失败 {code}: {e}")
+            logger.debug(f"东财K线获取失败 {code}: {e}")
             return []
             
     async def get_sector_ranking(self, sector_type: str = "industry") -> List[Dict]:

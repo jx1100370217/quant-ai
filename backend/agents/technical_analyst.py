@@ -94,7 +94,7 @@ class TechnicalAnalyst(BaseAgent):
             prompt=prompt,
             pydantic_model=BatchSignals,
             system_prompt=system_prompt,
-            max_tokens=1500,
+            max_tokens=200000,
             default_factory=lambda: BatchSignals(signals={
                 code: AgentSignal(signal="neutral", confidence=30, reasoning="技术分析暂时不可用")
                 for code in all_indicators

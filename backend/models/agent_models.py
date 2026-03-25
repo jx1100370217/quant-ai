@@ -25,6 +25,16 @@ class BatchSignals(BaseModel):
     """批量分析输出：一次 LLM 调用分析所有股票，减少 API 调用次数"""
     signals: Dict[str, AgentSignal] = Field(description="股票代码到信号的映射")
 
+    @classmethod
+    def model_json_schema(cls, **kwargs):
+        """确保 JSON schema 中 signals 是 required（避免 LLM 返回空对象）"""
+        schema = super().model_json_schema(**kwargs)
+        if "required" not in schema:
+            schema["required"] = ["signals"]
+        elif "signals" not in schema["required"]:
+            schema["required"].append("signals")
+        return schema
+
     @field_validator("signals", mode="before")
     @classmethod
     def parse_signals_if_string(cls, v):
