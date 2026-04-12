@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import {
   CalendarDays, RefreshCw, Loader2, ChevronDown, ChevronUp,
   TrendingUp, TrendingDown, Minus, AlertTriangle, BookOpen,
@@ -243,6 +243,7 @@ export default function WeeklyAdvisor() {
   const [report, setReport] = useState<WeeklyReport | null>(null)
   const [loading, setLoading] = useState(false)
   const [generating, setGenerating] = useState(false)
+  const generatingRef = useRef(false)           // 稳定守卫，避免闭包陷阱
   const [error, setError] = useState<string | null>(null)
   const [generatingStep, setGeneratingStep] = useState(0)
 
@@ -287,14 +288,21 @@ export default function WeeklyAdvisor() {
     }
   }, [])
 
-  // 生成新周报
+  // 生成新周报（使用 ref 守卫 + 最小显示时间，确保用户能看到加载状态）
   const generateReport = useCallback(async () => {
-    if (generating) return
+    if (generatingRef.current) return        // ref 始终读到最新值，不受闭包影响
+    generatingRef.current = true
     setGenerating(true)
     setError(null)
+    const startTime = Date.now()
     try {
       const res = await fetch('/api/weekly-advisor', { method: 'POST' })
       const data = await res.json()
+      // 若后端缓存秒回，至少展示 800ms 加载态，让用户感知到"已刷新"
+      const elapsed = Date.now() - startTime
+      if (elapsed < 800) {
+        await new Promise(r => setTimeout(r, 800 - elapsed))
+      }
       if (data.success && data.data) {
         setReport(data.data)
       } else {
@@ -303,9 +311,10 @@ export default function WeeklyAdvisor() {
     } catch (e: any) {
       setError(e.message || '网络异常')
     } finally {
+      generatingRef.current = false
       setGenerating(false)
     }
-  }, [generating])
+  }, [])  // 空依赖 → 稳定引用，不会因 re-render 丢失事件绑定
 
   // 首次自动加载最新周报
   useEffect(() => {
