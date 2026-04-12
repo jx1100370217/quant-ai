@@ -122,7 +122,7 @@ agent_mgr.register_agent(stanley_druckenmiller)
 agent_mgr.register_agent(bill_ackman)
 
 # 初始化周度选股顾问
-weekly_advisor = WeeklyAdvisor(agent_manager=agent_mgr)
+weekly_advisor = WeeklyAdvisor()
 
 # 初始化策略（保留，用于兼容）
 momentum_strategy = MomentumStrategy()
@@ -170,21 +170,31 @@ async def root():
 
 @app.get("/api/market/overview")
 async def get_market_overview():
-    """大盘概览"""
+    """大盘概览（含指数 + 板块 + 市场统计）"""
     try:
         indices = ["000001.SH", "399001.SZ", "399006.SZ"]
         overview_data = {}
-        
+
         for index_code in indices:
             quote = await eastmoney.get_quote(index_code)
             overview_data[index_code] = quote
-        
-        market_stats = await eastmoney.get_market_stats()
-        
+
+        # 并行获取板块和市场统计
+        import asyncio as _aio
+        market_stats_task = _aio.create_task(eastmoney.get_market_stats())
+        sectors_task = _aio.create_task(eastmoney.get_sector_ranking())
+
+        market_stats = await market_stats_task
+        try:
+            sectors = await sectors_task
+        except Exception:
+            sectors = []
+
         return {
             "success": True,
             "data": {
                 "indices": overview_data,
+                "sectors": sectors,
                 "market_stats": market_stats,
                 "timestamp": datetime.now()
             }

@@ -2,8 +2,10 @@ import aiohttp
 import asyncio
 import json
 import logging
+import os
 import re
 import time
+from pathlib import Path
 from typing import Dict, List, Optional, Any
 from config import config
 
@@ -14,6 +16,37 @@ logger = logging.getLogger(__name__)
 _QUOTE_CACHE: Dict[str, tuple] = {}   # {code: (timestamp, data)}
 _SECTOR_CACHE: tuple = (0, None)      # (timestamp, data)
 _CACHE_TTL = 60                        # 60 秒内复用缓存
+
+# ── 持久化板块缓存（JSON 文件）────────────────────────────────────────────
+# 当所有 API 都失败时（如周末），返回上次成功获取的数据
+_SECTOR_CACHE_FILE = Path(__file__).parent.parent / "cache" / "sector_ranking.json"
+
+
+def _save_sector_cache(data: List[Dict]):
+    """持久化板块数据到 JSON 文件"""
+    try:
+        _SECTOR_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        payload = {"timestamp": time.time(), "data": data}
+        _SECTOR_CACHE_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2))
+    except Exception as e:
+        logger.debug(f"保存板块缓存失败: {e}")
+
+
+def _load_sector_cache() -> Optional[List[Dict]]:
+    """从 JSON 文件加载板块缓存（7天内有效）"""
+    try:
+        if not _SECTOR_CACHE_FILE.exists():
+            return None
+        payload = json.loads(_SECTOR_CACHE_FILE.read_text())
+        ts = payload.get("timestamp", 0)
+        # 7天内的缓存都认为可用（周末+节假日场景）
+        if time.time() - ts > 7 * 86400:
+            return None
+        data = payload.get("data", [])
+        return data if data else None
+    except Exception as e:
+        logger.debug(f"读取板块缓存失败: {e}")
+        return None
 
 _SHARED_SESSION: Optional[aiohttp.ClientSession] = None
 _REQUEST_SEMAPHORE: Optional[asyncio.Semaphore] = None
@@ -432,9 +465,10 @@ class EastmoneyAPI:
             logger.debug(f"东财K线获取失败 {code}: {e}")
             return []
             
-    async def get_sector_ranking(self, sector_type: str = "industry") -> List[Dict]:
-        """获取板块排行（含 60s 缓存）
+    async def get_sector_ranking(self, sector_type: str = "industry", retries: int = 3) -> List[Dict]:
+        """获取板块排行（含 60s 缓存，带重试，双源）
         sector_type: industry=行业板块, concept=概念板块
+        优先 push2 实时接口，失败回退 datacenter 接口
         """
         # ── 缓存命中检查 ───────────────────────────────
         global _SECTOR_CACHE
@@ -443,41 +477,164 @@ class EastmoneyAPI:
         if cached is not None and now - ts < _CACHE_TTL:
             return cached
 
+        # ── 方案A：push2 实时接口（交易时段优先） ──────────
+        result = await self._fetch_sectors_push2(sector_type, retries)
+        if result:
+            _SECTOR_CACHE = (time.time(), result)
+            _save_sector_cache(result)
+            return result
+
+        # ── 方案B：datacenter 接口（非交易时段备用） ───────
+        result = await self._fetch_sectors_datacenter()
+        if result:
+            _SECTOR_CACHE = (time.time(), result)
+            _save_sector_cache(result)
+            return result
+
+        # ── 方案C：新浪财经板块接口 ──────────────────────
+        result = await self._fetch_sectors_sina()
+        if result:
+            _SECTOR_CACHE = (time.time(), result)
+            _save_sector_cache(result)
+            return result
+
+        # ── 方案D：持久化文件缓存（周末/节假日兜底） ─────
+        file_cached = _load_sector_cache()
+        if file_cached:
+            logger.info(f"使用持久化缓存板块数据（{len(file_cached)}条）")
+            _SECTOR_CACHE = (time.time(), file_cached)
+            return file_cached
+
+        # 全部失败返回空
+        _SECTOR_CACHE = (time.time(), [])
+        return []
+
+    async def _fetch_sectors_push2(self, sector_type: str, retries: int) -> List[Dict]:
+        """push2 实时板块接口"""
         fs = "m:90+t:2+f:!50" if sector_type == "industry" else "m:90+t:3+f:!50"
         url = (f"https://push2.eastmoney.com/api/qt/clist/get"
                f"?cb=j&pn=1&pz=50&po=1&np=1&ut={self.ut}&fltt=2&invt=2"
                f"&fid=f62&fs={fs}&fields=f12,f14,f2,f3,f62,f184")
-        
         headers = {
             'Referer': 'https://data.eastmoney.com/',
-            'User-Agent': 'Mozilla/5.0'
+            'User-Agent': 'Mozilla/5.0',
+            'Connection': 'close',
         }
-        
-        try:
-            async with _make_session() as session:
-                async with session.get(url, headers=headers) as resp:
-                    text = await resp.text()
-                    # 去掉JSONP包装
-                    json_str = text.replace("j(", "").rstrip(");")
-                    data = json.loads(json_str)
-                    
-                    result = []
-                    if data.get("rc") == 0 and data.get("data", {}).get("diff"):
-                        for item in data["data"]["diff"]:
-                            result.append({
-                                "code": item["f12"],
-                                "name": item["f14"],
-                                "price": item.get("f2", 0),
-                                "change_pct": item.get("f3", 0) / 100,
-                                "net_inflow": item.get("f62", 0),
-                                "inflow_rate": item.get("f184", 0) / 100
-                            })
-                    _SECTOR_CACHE = (time.time(), result)   # 写入缓存
+        for attempt in range(retries):
+            try:
+                session_obj = _create_raw_session()
+                try:
+                    async with session_obj.get(url, headers=headers) as resp:
+                        text = await resp.text()
+                finally:
+                    await session_obj.close()
+
+                json_str = text.replace("j(", "").rstrip(");")
+                data = json.loads(json_str)
+                result = []
+                if data.get("rc") == 0 and data.get("data", {}).get("diff"):
+                    for item in data["data"]["diff"]:
+                        f3 = item.get("f3")
+                        f184 = item.get("f184")
+                        result.append({
+                            "code": item["f12"],
+                            "name": item["f14"],
+                            "price": item.get("f2", 0),
+                            "change_pct": (f3 / 100) if isinstance(f3, (int, float)) else 0,
+                            "net_inflow": item.get("f62", 0),
+                            "inflow_rate": (f184 / 100) if isinstance(f184, (int, float)) else 0,
+                        })
+                if result:
                     return result
+            except Exception as e:
+                logger.warning(f"push2板块排行失败 (attempt {attempt+1}/{retries}): {e}")
+                if attempt < retries - 1:
+                    await asyncio.sleep(0.3 * (attempt + 1))
+        return []
+
+    async def _fetch_sectors_datacenter(self) -> List[Dict]:
+        """备用：用 urllib 绕过 aiohttp 连接问题获取板块数据"""
+        import urllib.request
+        import ssl
+
+        fs = "m:90+t:2+f:!50"
+        url = (f"https://push2.eastmoney.com/api/qt/clist/get"
+               f"?pn=1&pz=50&po=1&np=1&ut={self.ut}&fltt=2&invt=2"
+               f"&fid=f62&fs={fs}&fields=f12,f14,f2,f3,f62,f184")
+
+        def _sync_fetch():
+            ctx = ssl.create_default_context()
+            req = urllib.request.Request(url, headers={
+                'Referer': 'https://data.eastmoney.com/',
+                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+            })
+            with urllib.request.urlopen(req, timeout=15, context=ctx) as resp:
+                return resp.read().decode('utf-8')
+
+        try:
+            text = await asyncio.to_thread(_sync_fetch)
+            data = json.loads(text)
+            result = []
+            if data.get("rc") == 0 and data.get("data", {}).get("diff"):
+                for item in data["data"]["diff"]:
+                    f3 = item.get("f3")
+                    f184 = item.get("f184")
+                    result.append({
+                        "code": item.get("f12", ""),
+                        "name": item.get("f14", ""),
+                        "price": item.get("f2", 0),
+                        "change_pct": (f3 / 100) if isinstance(f3, (int, float)) else 0,
+                        "net_inflow": item.get("f62", 0),
+                        "inflow_rate": (f184 / 100) if isinstance(f184, (int, float)) else 0,
+                    })
+            return result
         except Exception as e:
-            logger.warning(f"获取板块排行失败: {e}")
+            logger.warning(f"urllib板块排行失败: {e}")
             return []
             
+    async def _fetch_sectors_sina(self) -> List[Dict]:
+        """备用：新浪财经行业板块接口"""
+        import urllib.request
+        import ssl
+
+        url = "https://vip.stock.finance.sina.com.cn/q/view/newSinaHy.php"
+
+        def _sync_fetch():
+            ctx = ssl.create_default_context()
+            req = urllib.request.Request(url, headers={
+                'Referer': 'https://finance.sina.com.cn/',
+                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+            })
+            with urllib.request.urlopen(req, timeout=15, context=ctx) as resp:
+                return resp.read().decode('gb2312', errors='ignore')
+
+        try:
+            text = await asyncio.to_thread(_sync_fetch)
+            # 新浪返回 JS var: {code:"new_xxxx",name:"板块名",avg_price:xx,change_pct:xx, ...}
+            # 格式: var S_Finance_bankuai_sin498 = [{...}, ...]
+            match = re.search(r'=\s*(\[.*?\])\s*;?$', text, re.DOTALL)
+            if not match:
+                return []
+            data = json.loads(match.group(1))
+            result = []
+            for item in data[:50]:
+                name = item.get("name", "")
+                change_pct = float(item.get("avg_changeratio", 0)) if item.get("avg_changeratio") else 0
+                result.append({
+                    "code": item.get("code", ""),
+                    "name": name,
+                    "price": float(item.get("avg_price", 0)) if item.get("avg_price") else 0,
+                    "change_pct": change_pct,
+                    "net_inflow": 0,    # 新浪接口无资金流数据
+                    "inflow_rate": 0,
+                })
+            # 按涨跌幅排序
+            result.sort(key=lambda x: x["change_pct"], reverse=True)
+            return result
+        except Exception as e:
+            logger.warning(f"新浪板块排行失败: {e}")
+            return []
+
     async def get_sector_stocks(self, sector_code: str, limit: int = 8, retries: int = 3) -> List[Dict]:
         """获取板块成分股（按主力净流入排序，fltt=2 直接是浮点）"""
         url = (f"https://push2.eastmoney.com/api/qt/clist/get"
@@ -517,17 +674,36 @@ class EastmoneyAPI:
         return []
 
     async def get_top_stocks_market_wide(self, limit: int = 30, sort_by: str = "inflow", retries: int = 3) -> List[Dict]:
-        """全A股按主力净流入/涨幅排序，返回 Top N 个股
+        """全A股按主力净流入/涨幅排序，返回 Top N 个股（支持自动分页）
         sort_by: inflow=主力净流入, change=涨幅
         fs: m:0+t:6 (深主板) + m:0+t:80 (创业板) + m:1+t:2 (沪主板) + m:1+t:23 (科创板)
         过滤: f:!50 排除ST
         """
         fid = "f62" if sort_by == "inflow" else "f3"
-        # 沪深A股个股: m:0+t:6(深主板) m:0+t:80(创业板) m:1+t:2(沪主板) m:1+t:23(科创板)
-        url = (f"https://push2.eastmoney.com/api/qt/clist/get"
-               f"?cb=j&pn=1&pz={limit}&po=1&np=1&ut={self.ut}&fltt=2&invt=2"
-               f"&fid={fid}&fs=m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23"
-               f"&fields=f12,f14,f2,f3,f62,f184,f9,f23,f115,f20")
+        page_size = min(limit, 100)  # 东方财富API单页最多100条
+        total_pages = (limit + page_size - 1) // page_size
+        all_results = []
+
+        for page in range(1, total_pages + 1):
+            remaining = limit - len(all_results)
+            pz = min(page_size, remaining)
+            url = (f"https://push2.eastmoney.com/api/qt/clist/get"
+                   f"?cb=j&pn={page}&pz={pz}&po=1&np=1&ut={self.ut}&fltt=2&invt=2"
+                   f"&fid={fid}&fs=m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23"
+                   f"&fields=f12,f14,f2,f3,f62,f184,f9,f23,f115,f20")
+            page_results = await self._fetch_stock_page(url, retries)
+            if page_results:
+                all_results.extend(page_results)
+            else:
+                break  # 没有更多数据
+            if len(page_results) < pz:
+                break  # 已获取所有数据
+            await asyncio.sleep(0.2)  # 避免请求过快
+
+        return all_results[:limit]
+
+    async def _fetch_stock_page(self, url: str, retries: int = 3) -> List[Dict]:
+        """获取单页股票数据（内部方法）"""
         headers = {'Referer': 'https://quote.eastmoney.com/', 'User-Agent': 'Mozilla/5.0'}
         for attempt in range(retries):
             try:

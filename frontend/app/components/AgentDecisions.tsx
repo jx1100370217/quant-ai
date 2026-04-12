@@ -112,6 +112,7 @@ export default function AgentDecisions({ holdings = [], selectedCode, onSelectSt
   const [expandedPick, setExpandedPick] = useState<'sector' | 'master' | null>(null)
   const [lastUpdated, setLastUpdated] = useState<string | null>(null)
   const [agentGroups, setAgentGroups] = useState<string[]>([])
+  const [analysisTriggered, setAnalysisTriggered] = useState(false)
 
   // 同步外部 selectedCode
   useEffect(() => {
@@ -121,6 +122,12 @@ export default function AgentDecisions({ holdings = [], selectedCode, onSelectSt
   const handleExpand = (code: string, name: string) => {
     const next = expandedStock === code ? null : code
     setExpandedStock(next)
+    // Trigger analysis if not yet triggered
+    if (next && !analysisTriggered && analyses.length === 0) {
+      setAnalysisTriggered(true)
+      fetchAnalysis()
+      fetchMarketPicks()
+    }
     if (onSelectStock) onSelectStock(
       next ? code : (analyses[0]?.code ?? code),
       next ? name : (analyses[0]?.name ?? name)
@@ -230,21 +237,6 @@ export default function AgentDecisions({ holdings = [], selectedCode, onSelectSt
     }
   }, [holdings.map(h => h.code).join(',')])
 
-  useEffect(() => {
-    if (holdings.length > 0) {
-      fetchAnalysis()
-      const timer = setInterval(fetchAnalysis, 120000) // 2分钟刷新持仓
-      return () => clearInterval(timer)
-    }
-  }, [fetchAnalysis])
-
-  useEffect(() => {
-    if (holdings.length > 0) {
-      fetchMarketPicks()
-      const timer = setInterval(fetchMarketPicks, 300000) // 5分钟刷新精选
-      return () => clearInterval(timer)
-    }
-  }, [fetchMarketPicks])
 
   // ─── 综合统计 ─────────────────────────────────────────────
   const bullishCount = analyses.filter(a => a.overallSignal === 'bullish').length
@@ -349,6 +341,13 @@ export default function AgentDecisions({ holdings = [], selectedCode, onSelectSt
             </div>
             <span className="text-sm font-mono font-bold text-cyan-400">{avgConf}%</span>
           </div>
+        </div>
+      )}
+
+      {/* 未触发分析提示 */}
+      {analyses.length === 0 && !analysisTriggered && !loading && (
+        <div className="rounded-lg border border-gray-800/50 bg-gray-900/20 p-4 mb-4">
+          <p className="text-sm text-gray-400">点击上方按钮启动16位大师分析</p>
         </div>
       )}
 

@@ -17,11 +17,14 @@ interface StockRecommendation {
   position_pct: number
   buy_reason: string
   risk_note: string
-  master_consensus: string
-  bullish_count: number
-  bearish_count: number
-  neutral_count: number
+  master_consensus?: string
+  bullish_count?: number
+  bearish_count?: number
+  neutral_count?: number
   confidence: number
+  reversal_score?: number
+  decline_5d?: number
+  reversal_reason?: string
 }
 
 interface WeeklyReport {
@@ -163,53 +166,37 @@ function StockCard({ stock, index }: StockCardProps) {
           </div>
         </div>
 
-        {/* 大师共识 */}
-        <div className="mb-3">
-          <div className="flex items-center justify-between mb-1.5 text-xs">
-            <span className="text-gray-500 flex items-center space-x-1">
-              <BarChart3 className="w-3 h-3" />
-              <span>大师共识</span>
-              <span className="text-gray-600">({totalVotes}位)</span>
-            </span>
-            <span className="text-gray-500 font-mono text-xs">{stock.master_consensus}</span>
-          </div>
-          <div className="flex items-center space-x-2">
-            {/* Bullish */}
-            <div className="flex items-center space-x-1">
-              <TrendingUp className="w-3 h-3 text-red-400" />
-              <span className="text-xs text-red-400 font-mono font-bold">{stock.bullish_count}</span>
-              <div className="flex space-x-0.5">
-                {Array.from({ length: Math.min(stock.bullish_count, 8) }).map((_, i) => (
-                  <div key={i} className="w-2 h-3 rounded-sm bg-red-500/70" />
-                ))}
-              </div>
+        {/* 反转评分 */}
+        {stock.reversal_score !== undefined && (
+          <div className="mb-3">
+            <div className="flex items-center justify-between mb-1.5 text-xs">
+              <span className="text-gray-500 flex items-center space-x-1">
+                <BarChart3 className="w-3 h-3" />
+                <span>反转评分</span>
+              </span>
+              <span className="font-mono font-bold text-cyan-400">{stock.reversal_score}</span>
             </div>
-            <span className="text-gray-700">|</span>
-            {/* Neutral */}
-            <div className="flex items-center space-x-1">
-              <Minus className="w-3 h-3 text-yellow-400" />
-              <span className="text-xs text-yellow-400 font-mono font-bold">{stock.neutral_count}</span>
-              <div className="flex space-x-0.5">
-                {Array.from({ length: Math.min(stock.neutral_count, 8) }).map((_, i) => (
-                  <div key={i} className="w-2 h-3 rounded-sm bg-yellow-500/70" />
-                ))}
-              </div>
-            </div>
-            <span className="text-gray-700">|</span>
-            {/* Bearish */}
-            <div className="flex items-center space-x-1">
-              <TrendingDown className="w-3 h-3 text-green-400" />
-              <span className="text-xs text-green-400 font-mono font-bold">{stock.bearish_count}</span>
-              <div className="flex space-x-0.5">
-                {Array.from({ length: Math.min(stock.bearish_count, 8) }).map((_, i) => (
-                  <div key={i} className="w-2 h-3 rounded-sm bg-green-500/70" />
-                ))}
-              </div>
+            <div className="h-2 rounded-full bg-gray-800 overflow-hidden">
+              <div
+                className="h-full rounded-full bg-gradient-to-r from-cyan-700 to-cyan-400 transition-all duration-1000"
+                style={{ width: `${Math.min(stock.reversal_score, 100)}%` }}
+              />
             </div>
           </div>
-        </div>
+        )}
 
-        {/* 买入理由（展开/折叠） */}
+        {/* 5日跌幅 */}
+        {stock.decline_5d !== undefined && (
+          <div className="mb-3">
+            <div className="flex items-center space-x-1 text-xs">
+              <TrendingDown className="w-3 h-3 text-orange-400" />
+              <span className="text-gray-500">5日跌幅:</span>
+              <span className="font-mono font-bold text-orange-400">{stock.decline_5d.toFixed(1)}%</span>
+            </div>
+          </div>
+        )}
+
+        {/* 买入理由/反转理由（展开/折叠） */}
         <div className="mb-2 rounded-lg border border-gray-800/60 overflow-hidden">
           <button
             onClick={() => setReasonOpen(v => !v)}
@@ -217,13 +204,13 @@ function StockCard({ stock, index }: StockCardProps) {
           >
             <div className="flex items-center space-x-1.5">
               <BookOpen className="w-3.5 h-3.5" />
-              <span className="font-medium">买入理由</span>
+              <span className="font-medium">{stock.reversal_reason ? '反转理由' : '买入理由'}</span>
             </div>
             {reasonOpen ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
           </button>
           {reasonOpen && (
             <div className="px-3 pb-3 pt-1 bg-gray-900/30 text-xs text-gray-300 leading-relaxed">
-              {stock.buy_reason}
+              {stock.reversal_reason || stock.buy_reason}
             </div>
           )}
         </div>
@@ -261,12 +248,11 @@ export default function WeeklyAdvisor() {
 
   // 生成进度提示
   const GENERATING_STEPS = [
-    '🔍 扫描全市场候选股票...',
-    '⚙️ 量化指标预筛选中...',
-    '🧠 召唤 16 位投资大师分析...',
-    '📊 整合大师共识与置信度...',
-    '✍️ 撰写周度报告...',
-    '⏳ 即将完成，请稍候...',
+    '🔍 扫描全市场500+股票...',
+    '📉 识别上周下跌3-8%候选...',
+    '⚙️ 反转力度评分中...',
+    '📊 综合排序与筛选...',
+    '✍️ 生成反转策略周报...',
   ]
 
   useEffect(() => {
@@ -414,7 +400,7 @@ export default function WeeklyAdvisor() {
         <div className="flex flex-col items-center justify-center py-12 text-center">
           <ScanSearch className="w-12 h-12 text-gray-700 mb-4" />
           <p className="text-gray-500 text-sm mb-1">暂无周度选股报告</p>
-          <p className="text-gray-600 text-xs mb-4">点击右上角「生成本周推荐」，让 AI 大师为你精选本周最优股票</p>
+          <p className="text-gray-600 text-xs mb-4">点击右上角「生成本周推荐」，使用反转策略为你精选本周最优股票</p>
           <button
             onClick={generateReport}
             className="flex items-center space-x-2 px-4 py-2 rounded-lg text-sm font-semibold bg-cyan-900/30 border border-cyan-500/40 text-cyan-400 hover:bg-cyan-900/50 transition-all"
