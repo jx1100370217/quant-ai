@@ -47,7 +47,7 @@ function readEastMoneyCookies(): Record<string, string> {
           const name = readStr(nameOff)
           const value = readStr(valueOff)
 
-          if (domain.includes('jyjqtxmix') || domain.includes('jywg')) {
+          if (domain.includes('jyjqtxmix')) {
             cookies[name] = value
           }
         } catch {}

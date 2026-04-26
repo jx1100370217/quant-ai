@@ -48,6 +48,43 @@ def _load_sector_cache() -> Optional[List[Dict]]:
         logger.debug(f"读取板块缓存失败: {e}")
         return None
 
+
+# ── 持久化全 A 股 universe 缓存 ─────────────────────────────────────────
+# 周末/夜间 push2 抽风时回退用。Universe（按 amount/decline/inflow/change 排序的
+# 全 A 股 ~5500）几小时内不会有意义变化 —— 昨天的 Top 5500 ≈ 今天的 Top 5500。
+_UNIVERSE_CACHE_DIR = Path(__file__).parent.parent / "cache" / "universe"
+
+
+def _universe_cache_path(sort_by: str) -> Path:
+    return _UNIVERSE_CACHE_DIR / f"{sort_by}.json"
+
+
+def _save_universe_cache(sort_by: str, data: List[Dict]):
+    try:
+        _UNIVERSE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        payload = {"timestamp": time.time(), "sort_by": sort_by, "count": len(data), "data": data}
+        _universe_cache_path(sort_by).write_text(json.dumps(payload, ensure_ascii=False))
+    except Exception as e:
+        logger.debug(f"保存 universe 缓存失败 sort_by={sort_by}: {e}")
+
+
+def _load_universe_cache(sort_by: str, max_age_sec: int = 3 * 86400) -> Optional[List[Dict]]:
+    """从 JSON 文件加载 universe 缓存（默认 3 天内有效）"""
+    try:
+        path = _universe_cache_path(sort_by)
+        if not path.exists():
+            return None
+        payload = json.loads(path.read_text())
+        ts = payload.get("timestamp", 0)
+        if time.time() - ts > max_age_sec:
+            return None
+        data = payload.get("data", [])
+        return data if data else None
+    except Exception as e:
+        logger.debug(f"读取 universe 缓存失败 sort_by={sort_by}: {e}")
+        return None
+
+
 _SHARED_SESSION: Optional[aiohttp.ClientSession] = None
 _REQUEST_SEMAPHORE: Optional[asyncio.Semaphore] = None
 
@@ -56,8 +93,8 @@ def _create_raw_session() -> aiohttp.ClientSession:
     """创建不走代理的 aiohttp session（解决本地代理干扰问题）"""
     connector = aiohttp.TCPConnector(
         force_close=False,    # 复用TCP连接，避免频繁握手导致 Server disconnected
-        limit=10,             # 同一 host 最大连接数
-        limit_per_host=6,     # 单 host 限制
+        limit=64,             # 全局连接上限，配合 24 并发请求使用
+        limit_per_host=24,    # 单 host 限制（与 _REQUEST_SEMAPHORE 一致）
         enable_cleanup_closed=True,
     )
     timeout = aiohttp.ClientTimeout(total=20)
@@ -73,10 +110,14 @@ def _get_shared_session() -> aiohttp.ClientSession:
 
 
 def _get_semaphore() -> asyncio.Semaphore:
-    """获取或创建全局请求信号量（限制并发请求数）"""
+    """获取或创建全局请求信号量（限制并发请求数）
+
+    周度选股需要扫描 5500 只 K 线，原 6 路并发约 5+ 分钟（超过前端 3min 超时）。
+    sina/腾讯 K 线接口承载力远高于此，提升到 24 后实测整轮缩短到 ~90s。
+    """
     global _REQUEST_SEMAPHORE
     if _REQUEST_SEMAPHORE is None:
-        _REQUEST_SEMAPHORE = asyncio.Semaphore(6)
+        _REQUEST_SEMAPHORE = asyncio.Semaphore(24)
     return _REQUEST_SEMAPHORE
 
 
@@ -510,87 +551,100 @@ class EastmoneyAPI:
         return []
 
     async def _fetch_sectors_push2(self, sector_type: str, retries: int) -> List[Dict]:
-        """push2 实时板块接口"""
+        """push2 实时板块接口（带 host fallback：主节点失败回退延迟节点）
+
+        push2.eastmoney.com 在周末/非交易时段经常 "Server disconnected"，
+        push2delay.eastmoney.com（延迟行情）此场景下反而稳定可用。
+        """
         fs = "m:90+t:2+f:!50" if sector_type == "industry" else "m:90+t:3+f:!50"
-        url = (f"https://push2.eastmoney.com/api/qt/clist/get"
-               f"?cb=j&pn=1&pz=50&po=1&np=1&ut={self.ut}&fltt=2&invt=2"
-               f"&fid=f62&fs={fs}&fields=f12,f14,f2,f3,f62,f184")
+        path_and_query = (f"/api/qt/clist/get"
+                          f"?cb=j&pn=1&pz=50&po=1&np=1&ut={self.ut}&fltt=2&invt=2"
+                          f"&fid=f62&fs={fs}&fields=f12,f14,f2,f3,f62,f184")
         headers = {
             'Referer': 'https://data.eastmoney.com/',
             'User-Agent': 'Mozilla/5.0',
             'Connection': 'close',
         }
-        for attempt in range(retries):
-            try:
-                session_obj = _create_raw_session()
+        for host in self._CLIST_HOSTS:
+            url = f"https://{host}{path_and_query}"
+            for attempt in range(retries):
                 try:
-                    async with session_obj.get(url, headers=headers) as resp:
-                        text = await resp.text()
-                finally:
-                    await session_obj.close()
+                    session_obj = _create_raw_session()
+                    try:
+                        async with session_obj.get(url, headers=headers) as resp:
+                            text = await resp.text()
+                    finally:
+                        await session_obj.close()
 
-                json_str = text.replace("j(", "").rstrip(");")
-                data = json.loads(json_str)
-                result = []
-                if data.get("rc") == 0 and data.get("data", {}).get("diff"):
-                    for item in data["data"]["diff"]:
-                        f3 = item.get("f3")
-                        f184 = item.get("f184")
-                        result.append({
-                            "code": item["f12"],
-                            "name": item["f14"],
-                            "price": item.get("f2", 0),
-                            "change_pct": (f3 / 100) if isinstance(f3, (int, float)) else 0,
-                            "net_inflow": item.get("f62", 0),
-                            "inflow_rate": (f184 / 100) if isinstance(f184, (int, float)) else 0,
-                        })
-                if result:
-                    return result
-            except Exception as e:
-                logger.warning(f"push2板块排行失败 (attempt {attempt+1}/{retries}): {e}")
-                if attempt < retries - 1:
-                    await asyncio.sleep(0.3 * (attempt + 1))
+                    json_str = text.replace("j(", "").rstrip(");")
+                    data = json.loads(json_str)
+                    result = []
+                    if data.get("rc") == 0 and data.get("data", {}).get("diff"):
+                        for item in data["data"]["diff"]:
+                            f3 = item.get("f3")
+                            f184 = item.get("f184")
+                            result.append({
+                                "code": item["f12"],
+                                "name": item["f14"],
+                                "price": item.get("f2", 0),
+                                "change_pct": (f3 / 100) if isinstance(f3, (int, float)) else 0,
+                                "net_inflow": item.get("f62", 0),
+                                "inflow_rate": (f184 / 100) if isinstance(f184, (int, float)) else 0,
+                            })
+                    if result:
+                        if host != self._CLIST_HOSTS[0]:
+                            logger.info(f"push2板块排行通过备用 host {host} 拉取成功（{len(result)}条）")
+                        return result
+                except Exception as e:
+                    logger.warning(f"push2板块排行失败 host={host} (attempt {attempt+1}/{retries}): {e}")
+                    if attempt < retries - 1:
+                        await asyncio.sleep(0.3 * (attempt + 1))
         return []
 
     async def _fetch_sectors_datacenter(self) -> List[Dict]:
-        """备用：用 urllib 绕过 aiohttp 连接问题获取板块数据"""
+        """备用：用 urllib 绕过 aiohttp 连接问题获取板块数据（带 host fallback）"""
         import urllib.request
         import ssl
 
         fs = "m:90+t:2+f:!50"
-        url = (f"https://push2.eastmoney.com/api/qt/clist/get"
-               f"?pn=1&pz=50&po=1&np=1&ut={self.ut}&fltt=2&invt=2"
-               f"&fid=f62&fs={fs}&fields=f12,f14,f2,f3,f62,f184")
+        path_and_query = (f"/api/qt/clist/get"
+                          f"?pn=1&pz=50&po=1&np=1&ut={self.ut}&fltt=2&invt=2"
+                          f"&fid=f62&fs={fs}&fields=f12,f14,f2,f3,f62,f184")
 
-        def _sync_fetch():
+        def _sync_fetch(_url: str):
             ctx = ssl.create_default_context()
-            req = urllib.request.Request(url, headers={
+            req = urllib.request.Request(_url, headers={
                 'Referer': 'https://data.eastmoney.com/',
                 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
             })
             with urllib.request.urlopen(req, timeout=15, context=ctx) as resp:
                 return resp.read().decode('utf-8')
 
-        try:
-            text = await asyncio.to_thread(_sync_fetch)
-            data = json.loads(text)
-            result = []
-            if data.get("rc") == 0 and data.get("data", {}).get("diff"):
-                for item in data["data"]["diff"]:
-                    f3 = item.get("f3")
-                    f184 = item.get("f184")
-                    result.append({
-                        "code": item.get("f12", ""),
-                        "name": item.get("f14", ""),
-                        "price": item.get("f2", 0),
-                        "change_pct": (f3 / 100) if isinstance(f3, (int, float)) else 0,
-                        "net_inflow": item.get("f62", 0),
-                        "inflow_rate": (f184 / 100) if isinstance(f184, (int, float)) else 0,
-                    })
-            return result
-        except Exception as e:
-            logger.warning(f"urllib板块排行失败: {e}")
-            return []
+        for host in self._CLIST_HOSTS:
+            url = f"https://{host}{path_and_query}"
+            try:
+                text = await asyncio.to_thread(_sync_fetch, url)
+                data = json.loads(text)
+                result = []
+                if data.get("rc") == 0 and data.get("data", {}).get("diff"):
+                    for item in data["data"]["diff"]:
+                        f3 = item.get("f3")
+                        f184 = item.get("f184")
+                        result.append({
+                            "code": item.get("f12", ""),
+                            "name": item.get("f14", ""),
+                            "price": item.get("f2", 0),
+                            "change_pct": (f3 / 100) if isinstance(f3, (int, float)) else 0,
+                            "net_inflow": item.get("f62", 0),
+                            "inflow_rate": (f184 / 100) if isinstance(f184, (int, float)) else 0,
+                        })
+                if result:
+                    if host != self._CLIST_HOSTS[0]:
+                        logger.info(f"urllib板块排行通过备用 host {host} 拉取成功（{len(result)}条）")
+                    return result
+            except Exception as e:
+                logger.warning(f"urllib板块排行失败 host={host}: {e}")
+        return []
             
     async def _fetch_sectors_sina(self) -> List[Dict]:
         """备用：新浪财经行业板块接口"""
@@ -673,74 +727,143 @@ class EastmoneyAPI:
                     await asyncio.sleep(1 * (attempt + 1))
         return []
 
+    # 全A股排行接口的 host fallback 列表
+    # push2 主节点在周末/非交易时段经常 "Empty reply from server"，
+    # push2delay（延迟行情）在此场景下反而可用 —— 数据同样是收盘后静态数据，够用
+    _CLIST_HOSTS = ("push2.eastmoney.com", "push2delay.eastmoney.com")
+    # 单页 fetch 时，记住"上一次成功"的 host —— 避免周末/非交易时段
+    # 每一页都先把 push2 主节点重试 3 次再切换（55 页 × 3-6s 浪费 = 3 分钟）
+    _PREFERRED_CLIST_HOST: Optional[str] = None
+
     async def get_top_stocks_market_wide(self, limit: int = 30, sort_by: str = "inflow", retries: int = 3) -> List[Dict]:
-        """全A股按主力净流入/涨幅排序，返回 Top N 个股（支持自动分页）
-        sort_by: inflow=主力净流入, change=涨幅
+        """全A股按指定字段排序，返回 Top N 个股（支持自动分页）
+        sort_by:
+          · inflow   — 主力净流入（f62 降序）
+          · change   — 涨幅榜（f3 降序）
+          · decline  — 跌幅榜（f3 升序）—— V12b 反转策略专用
+          · amount   — 成交额榜（f6 降序）
         fs: m:0+t:6 (深主板) + m:0+t:80 (创业板) + m:1+t:2 (沪主板) + m:1+t:23 (科创板)
         过滤: f:!50 排除ST
         """
-        fid = "f62" if sort_by == "inflow" else "f3"
+        # fid = 排序字段, po = 排序方向 (1=降序, 0=升序)
+        sort_map = {
+            "inflow":  ("f62", 1),
+            "change":  ("f3",  1),
+            "decline": ("f3",  0),
+            "amount":  ("f6",  1),
+        }
+        if sort_by not in sort_map:
+            raise ValueError(f"unsupported sort_by={sort_by!r}, choose from {list(sort_map.keys())}")
+        fid, po = sort_map[sort_by]
         page_size = min(limit, 100)  # 东方财富API单页最多100条
         total_pages = (limit + page_size - 1) // page_size
         all_results = []
+        failed_pages = 0   # 单页失败计数（不再因单页失败终止整个 universe 抓取）
+        consecutive_failures = 0
 
         for page in range(1, total_pages + 1):
             remaining = limit - len(all_results)
             pz = min(page_size, remaining)
-            url = (f"https://push2.eastmoney.com/api/qt/clist/get"
-                   f"?cb=j&pn={page}&pz={pz}&po=1&np=1&ut={self.ut}&fltt=2&invt=2"
-                   f"&fid={fid}&fs=m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23"
-                   f"&fields=f12,f14,f2,f3,f62,f184,f9,f23,f115,f20")
-            page_results = await self._fetch_stock_page(url, retries)
+            path_and_query = (f"/api/qt/clist/get"
+                              f"?cb=j&pn={page}&pz={pz}&po={po}&np=1&ut={self.ut}&fltt=2&invt=2"
+                              f"&fid={fid}&fs=m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23"
+                              f"&fields=f12,f14,f2,f3,f62,f184,f9,f23,f115,f20")
+            page_results = await self._fetch_stock_page(path_and_query, retries)
             if page_results:
                 all_results.extend(page_results)
+                consecutive_failures = 0
+                # 单页返回少于 pz 才说明真到尾页（不是失败）
+                if len(page_results) < pz:
+                    break
             else:
-                break  # 没有更多数据
-            if len(page_results) < pz:
-                break  # 已获取所有数据
+                # 单页失败：跳过、继续，但若连续失败 5 页则放弃后续页面
+                failed_pages += 1
+                consecutive_failures += 1
+                logger.warning(f"universe 第 {page} 页拉取失败，跳过 "
+                               f"(累计失败 {failed_pages}/{total_pages}，连续 {consecutive_failures})")
+                if consecutive_failures >= 5:
+                    logger.warning(f"连续 {consecutive_failures} 页失败，提前停止 universe 抓取")
+                    break
             await asyncio.sleep(0.2)  # 避免请求过快
+
+        # ── 容错：若实盘抓取部分/全失败，落到磁盘缓存 ─────────────
+        if not all_results:
+            cached = _load_universe_cache(sort_by)
+            if cached:
+                logger.warning(f"universe sort_by={sort_by} 实盘抓取全失败，"
+                               f"使用 {len(cached)} 只磁盘缓存（fallback）")
+                return cached[:limit]
+            logger.error(f"universe sort_by={sort_by} 抓取全失败且无缓存可用")
+            return []
+
+        # 部分成功也写入缓存（覆盖式 — 大概率是 universe 主体）
+        if len(all_results) >= max(100, limit // 5):
+            _save_universe_cache(sort_by, all_results)
+            if failed_pages > 0:
+                logger.info(f"universe sort_by={sort_by} 部分成功 {len(all_results)}/{limit}，"
+                            f"已写入缓存（{failed_pages} 页失败）")
 
         return all_results[:limit]
 
-    async def _fetch_stock_page(self, url: str, retries: int = 3) -> List[Dict]:
-        """获取单页股票数据（内部方法）"""
+    async def _fetch_stock_page(self, path_and_query: str, retries: int = 3) -> List[Dict]:
+        """获取单页股票数据（内部方法）
+        path_and_query: /api/qt/clist/get?... 形式，host 由本方法在 fallback 列表里挑选
+        优化：上一次成功的 host 排到首位，避免周末把 55 页都先撞到 push2 主节点
+              再 fallback 到 push2delay（每页浪费 3-6 秒）
+        """
         headers = {'Referer': 'https://quote.eastmoney.com/', 'User-Agent': 'Mozilla/5.0'}
-        for attempt in range(retries):
-            try:
-                async with _make_session() as session:
-                    async with session.get(url, headers=headers) as resp:
-                        text = await resp.text()
-                        json_str = text.replace("j(", "").rstrip(");")
-                        data = json.loads(json_str)
-                        result = []
-                        if data.get("rc") == 0 and data.get("data", {}).get("diff"):
-                            for d in data["data"]["diff"]:
-                                code = d.get("f12", "")
-                                if not code:
-                                    continue
-                                def _safe_float(v, default=0):
-                                    try: return float(v) if v is not None and v != '-' else default
-                                    except (ValueError, TypeError): return default
-                                result.append({
-                                    "code":         code,
-                                    "name":         d.get("f14", ""),
-                                    "price":        _safe_float(d.get("f2")),
-                                    "change_pct":   _safe_float(d.get("f3")),
-                                    "net_inflow":   _safe_float(d.get("f62")),
-                                    "inflow_rate":  _safe_float(d.get("f184")),
-                                    "pe_ttm":       _safe_float(d.get("f115")) or None,
-                                    "pb":           _safe_float(d.get("f23")) or None,
-                                    "market_cap_b": round(_safe_float(d.get("f20")) / 1e8, 1) if _safe_float(d.get("f20")) > 0 else None,
-                                    "source":       "market_wide",
-                                })
-                        if result:
-                            return result
-                        if attempt < retries - 1:
-                            await asyncio.sleep(1)
-            except Exception as e:
-                logger.warning(f"全A股排行获取失败 (attempt {attempt+1}): {e}")
-                if attempt < retries - 1:
-                    await asyncio.sleep(1 * (attempt + 1))
+        # 优先使用上一次成功的 host
+        if EastmoneyAPI._PREFERRED_CLIST_HOST:
+            ordered_hosts = (
+                EastmoneyAPI._PREFERRED_CLIST_HOST,
+                *[h for h in self._CLIST_HOSTS if h != EastmoneyAPI._PREFERRED_CLIST_HOST],
+            )
+        else:
+            ordered_hosts = self._CLIST_HOSTS
+        # 总尝试次数 = host 数 × retries，按 (host, attempt) 依次遍历
+        for host in ordered_hosts:
+            url = f"https://{host}{path_and_query}"
+            for attempt in range(retries):
+                try:
+                    async with _make_session() as session:
+                        async with session.get(url, headers=headers) as resp:
+                            text = await resp.text()
+                            json_str = text.replace("j(", "").rstrip(");")
+                            data = json.loads(json_str)
+                            result = []
+                            if data.get("rc") == 0 and data.get("data", {}).get("diff"):
+                                for d in data["data"]["diff"]:
+                                    code = d.get("f12", "")
+                                    if not code:
+                                        continue
+                                    def _safe_float(v, default=0):
+                                        try: return float(v) if v is not None and v != '-' else default
+                                        except (ValueError, TypeError): return default
+                                    result.append({
+                                        "code":         code,
+                                        "name":         d.get("f14", ""),
+                                        "price":        _safe_float(d.get("f2")),
+                                        "change_pct":   _safe_float(d.get("f3")),
+                                        "net_inflow":   _safe_float(d.get("f62")),
+                                        "inflow_rate":  _safe_float(d.get("f184")),
+                                        "pe_ttm":       _safe_float(d.get("f115")) or None,
+                                        "pb":           _safe_float(d.get("f23")) or None,
+                                        "market_cap_b": round(_safe_float(d.get("f20")) / 1e8, 1) if _safe_float(d.get("f20")) > 0 else None,
+                                        "source":       "market_wide",
+                                    })
+                            if result:
+                                # 记住成功的 host，下一页直接用它，省掉一次主节点重试
+                                if EastmoneyAPI._PREFERRED_CLIST_HOST != host:
+                                    logger.info(f"全A股排行 host 切换为 {host}")
+                                EastmoneyAPI._PREFERRED_CLIST_HOST = host
+                                return result
+                            if attempt < retries - 1:
+                                await asyncio.sleep(1)
+                except Exception as e:
+                    logger.warning(f"全A股排行获取失败 host={host} (attempt {attempt+1}): {e}")
+                    if attempt < retries - 1:
+                        await asyncio.sleep(1 * (attempt + 1))
+            logger.info(f"host={host} 全部重试失败，切换下一个 host")
         return []
 
     async def get_market_flow(self) -> Dict:
@@ -853,20 +976,25 @@ class EastmoneyAPI:
         return await self.get_sector_ranking(sector_type)
 
     async def get_market_stats(self) -> Dict:
-        """获取市场涨跌统计"""
-        url = (f"https://push2.eastmoney.com/api/qt/clist/get"
-               f"?pn=1&pz=1&po=1&np=1&ut={self.ut}&fltt=2&invt=2"
-               f"&fid=f3&fs=m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23"
-               f"&fields=f2,f3,f4,f12,f14&_=1")
-        try:
-            async with _make_session() as session:
-                async with session.get(url, headers=self.headers) as resp:
-                    data = await resp.json(content_type=None)
-                    total = data.get("data", {}).get("total", 0)
-                    return {"total": total, "timestamp": __import__("datetime").datetime.now().isoformat()}
-        except Exception as e:
-            logger.warning(f"获取市场统计失败: {e}")
-            return {}
+        """获取市场涨跌统计（带 host fallback）"""
+        path_and_query = (f"/api/qt/clist/get"
+                          f"?pn=1&pz=1&po=1&np=1&ut={self.ut}&fltt=2&invt=2"
+                          f"&fid=f3&fs=m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23"
+                          f"&fields=f2,f3,f4,f12,f14&_=1")
+        last_err = None
+        for host in self._CLIST_HOSTS:
+            url = f"https://{host}{path_and_query}"
+            try:
+                async with _make_session() as session:
+                    async with session.get(url, headers=self.headers) as resp:
+                        data = await resp.json(content_type=None)
+                        total = data.get("data", {}).get("total", 0)
+                        if total:
+                            return {"total": total, "timestamp": __import__("datetime").datetime.now().isoformat()}
+            except Exception as e:
+                last_err = e
+                logger.warning(f"获取市场统计失败 host={host}: {e}")
+        return {}
 
     async def get_market_overview(self) -> Dict:
         """获取市场全貌数据（供 agents 分析用）"""

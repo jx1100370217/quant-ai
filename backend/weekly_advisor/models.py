@@ -21,6 +21,11 @@ class StockCandidate(BaseModel):
     quant_score: float = Field(default=0.0, description="量化预筛分(0-100)")
     reversal_score: float = Field(default=0.0, description="反转得分(0-100)")
     composite_score: float = Field(default=0.0, description="综合评分(0-100)")
+    # V12b 评分细节（前端表格展示）
+    bounce_pct: Optional[float] = Field(default=None, description="5日低点反弹幅度(%)")
+    decline_7d: Optional[float] = Field(default=None, description="7日涨跌幅(%)")
+    vol_ratio: Optional[float] = Field(default=None, description="成交量/5日均量")
+    rsi6: Optional[float] = Field(default=None, description="RSI6 指标")
     # 辅助字段（内部使用）
     source: str = Field(default="", description="来源：reversal")
     sector_name: str = Field(default="", description="所属板块")
@@ -40,6 +45,11 @@ class StockRecommendation(BaseModel):
     reversal_score: float = Field(default=0.0, description="反转得分(0-100)")
     decline_5d: float = Field(default=0.0, description="5日跌幅(%)")
     confidence: float = Field(default=0.0, description="综合置信度(0-100)")
+    # V12b 评分细节（前端 Top5 表格展示）
+    bounce_pct: Optional[float] = Field(default=None, description="5日低点反弹幅度(%)")
+    decline_7d: Optional[float] = Field(default=None, description="7日涨跌幅(%)")
+    vol_ratio: Optional[float] = Field(default=None, description="成交量/5日均量")
+    rsi6: Optional[float] = Field(default=None, description="RSI6 指标")
 
 
 class WeeklyReport(BaseModel):

@@ -5,6 +5,7 @@ import {
   CalendarDays, RefreshCw, Loader2, ChevronDown, ChevronUp,
   TrendingUp, TrendingDown, Minus, AlertTriangle, BookOpen,
   Target, ShieldAlert, BarChart3, Sparkles, ScanSearch,
+  Table as TableIcon,
 } from 'lucide-react'
 
 // ─── Types ─────────────────────────────────────────────────
@@ -25,6 +26,11 @@ interface StockRecommendation {
   reversal_score?: number
   decline_5d?: number
   reversal_reason?: string
+  // V12b 评分细节 (Top 5 表格展示)
+  bounce_pct?: number | null
+  decline_7d?: number | null
+  vol_ratio?: number | null
+  rsi6?: number | null
 }
 
 interface WeeklyReport {
@@ -33,7 +39,7 @@ interface WeeklyReport {
   market_summary: string
   recommendations: StockRecommendation[]
   total_candidates_scanned: number
-  quant_filtered: number
+  reversal_filtered: number
   risk_warning: string
   strategy_notes: string
 }
@@ -58,6 +64,87 @@ function confidenceBarColor(conf: number): string {
 }
 
 // ─── Sub-components ────────────────────────────────────────
+
+// V12b Top 5 推荐组合 — 清单式表格（权重/代码/名称/评分/收盘价/反弹%/7日%/量比/RSI6）
+function Top5Table({ stocks }: { stocks: StockRecommendation[] }) {
+  if (!stocks || stocks.length === 0) return null
+  const fmt = (v: number | null | undefined, digits = 2, withSign = false) => {
+    if (v === null || v === undefined || Number.isNaN(v)) return '—'
+    const s = v.toFixed(digits)
+    return withSign && v > 0 ? `+${s}` : s
+  }
+  const delta7dColor = (v: number | null | undefined) => {
+    if (v === null || v === undefined) return 'text-gray-500'
+    return v < 0 ? 'text-green-400' : v > 0 ? 'text-red-400' : 'text-gray-400'
+  }
+
+  return (
+    <div className="rounded-lg border border-cyan-800/40 bg-gray-900/40 overflow-hidden">
+      <div className="flex items-center justify-between px-4 py-2.5 border-b border-cyan-800/40 bg-cyan-900/10">
+        <div className="flex items-center space-x-2">
+          <TableIcon className="w-4 h-4 text-cyan-400" />
+          <span className="text-sm font-semibold text-cyan-400">Top 5 推荐组合（按权重买入）</span>
+        </div>
+        <span className="text-xs text-gray-500 font-mono">V12b · 反弹≥3.5% ∧ 反转分≥40</span>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="text-gray-500 border-b border-gray-800/60">
+              <th className="px-3 py-2 text-left font-normal">#</th>
+              <th className="px-3 py-2 text-left font-normal">权重</th>
+              <th className="px-3 py-2 text-left font-normal">代码</th>
+              <th className="px-3 py-2 text-left font-normal">名称</th>
+              <th className="px-3 py-2 text-right font-normal">评分</th>
+              <th className="px-3 py-2 text-right font-normal">收盘价</th>
+              <th className="px-3 py-2 text-right font-normal">反弹%</th>
+              <th className="px-3 py-2 text-right font-normal">7日%</th>
+              <th className="px-3 py-2 text-right font-normal">量比</th>
+              <th className="px-3 py-2 text-right font-normal">RSI6</th>
+            </tr>
+          </thead>
+          <tbody>
+            {stocks.map((s, i) => (
+              <tr
+                key={s.code}
+                className="border-b border-gray-800/40 hover:bg-cyan-900/10 transition-colors"
+              >
+                <td className="px-3 py-2.5 text-gray-600 font-mono">{i + 1}</td>
+                <td className="px-3 py-2.5">
+                  <span className="font-bold text-cyan-400">{s.position_pct.toFixed(0)}%</span>
+                </td>
+                <td className="px-3 py-2.5 font-mono text-gray-400">{s.code}</td>
+                <td className="px-3 py-2.5 font-bold text-white">{s.name}</td>
+                <td className="px-3 py-2.5 text-right font-mono font-bold text-yellow-400">
+                  {s.reversal_score !== undefined ? s.reversal_score.toFixed(0) : '—'}
+                </td>
+                <td className="px-3 py-2.5 text-right font-mono text-gray-300">
+                  {s.current_price.toFixed(2)}
+                </td>
+                <td className="px-3 py-2.5 text-right font-mono text-green-400">
+                  {fmt(s.bounce_pct, 2)}
+                </td>
+                <td className={`px-3 py-2.5 text-right font-mono ${delta7dColor(s.decline_7d)}`}>
+                  {fmt(s.decline_7d, 2, true)}
+                </td>
+                <td className="px-3 py-2.5 text-right font-mono text-gray-300">
+                  {fmt(s.vol_ratio, 2)}
+                </td>
+                <td className="px-3 py-2.5 text-right font-mono text-gray-300">
+                  {fmt(s.rsi6, 1)}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div className="px-4 py-2 bg-gray-900/60 border-t border-gray-800/60 text-[11px] text-gray-500 leading-relaxed">
+        <span className="text-gray-400">提示：</span>
+        权重 Top1→Top5 为 35/25/20/12/8%（按反转分加权）；单股 -6% 挂止损；组合周内加权回撤 ≤ -4% 次日清仓
+      </div>
+    </div>
+  )
+}
 
 function SkeletonCard() {
   return (
@@ -296,7 +383,11 @@ export default function WeeklyAdvisor() {
     setError(null)
     const startTime = Date.now()
     try {
-      const res = await fetch('/api/weekly-advisor', { method: 'POST' })
+      const res = await fetch('/api/weekly-advisor', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ force: true }),
+      })
       const data = await res.json()
       // 若后端缓存秒回，至少展示 800ms 加载态，让用户感知到"已刷新"
       const elapsed = Date.now() - startTime
@@ -441,7 +532,12 @@ export default function WeeklyAdvisor() {
             </div>
           )}
 
-          {/* 推荐股票列表 */}
+          {/* Top 5 清单表格（V12b 指标速览） */}
+          {report.recommendations && report.recommendations.length > 0 && (
+            <Top5Table stocks={report.recommendations.slice(0, 5)} />
+          )}
+
+          {/* 推荐股票列表（卡片详情） */}
           {report.recommendations && report.recommendations.length > 0 && (
             <>
               <div className="flex items-center space-x-2">
@@ -450,7 +546,7 @@ export default function WeeklyAdvisor() {
                   本周精选推荐
                 </span>
                 <span className="text-xs text-gray-600">
-                  ({report.recommendations.length} 只)
+                  ({report.recommendations.length} 只 · 点击卡片查看理由/风险)
                 </span>
               </div>
               <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
@@ -462,7 +558,7 @@ export default function WeeklyAdvisor() {
           )}
 
           {/* 底部统计栏 */}
-          {(report.total_candidates_scanned || report.quant_filtered) && (
+          {(report.total_candidates_scanned || report.reversal_filtered) && (
             <div className="flex items-center justify-center space-x-2 text-xs text-gray-500 py-2 border-t border-gray-800/50 flex-wrap gap-y-1">
               <div className="flex items-center space-x-1">
                 <ScanSearch className="w-3.5 h-3.5 text-gray-600" />
@@ -473,7 +569,7 @@ export default function WeeklyAdvisor() {
               <span className="text-gray-700">→</span>
               <div className="flex items-center space-x-1">
                 <span>量化预筛</span>
-                <span className="font-mono font-bold text-cyan-400">{report.quant_filtered ?? '--'}</span>
+                <span className="font-mono font-bold text-cyan-400">{report.reversal_filtered ?? '--'}</span>
                 <span>只</span>
               </div>
               <span className="text-gray-700">→</span>

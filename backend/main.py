@@ -48,6 +48,11 @@ from strategies.multi_factor import MultiFactorStrategy
 from utils.helpers import format_number, calculate_returns, get_trading_dates
 from utils.telegram import notify_full_analysis, notify_market_picks, notify_holdings_analysis
 from weekly_advisor.advisor import WeeklyAdvisor
+from weekly_advisor.portfolio_monitor import (
+    check_portfolio_stop,
+    clear_active_positions,
+    load_active_positions,
+)
 
 # 配置日志
 logging.basicConfig(level=logging.INFO)
@@ -695,15 +700,16 @@ async def analyze_holdings(body: dict):
 
 
 @app.post("/api/weekly-advisor/generate")
-async def generate_weekly_picks():
+async def generate_weekly_picks(force: bool = False):
     """
     生成本周选股建议报告（四阶段：宽选→量化预筛→AI大师评审→LLM周报）
     - 包含并发锁，防止重复调用
     - 同日内结果会被缓存复用
+    - force=True 时清除缓存，强制重新生成
     """
     try:
-        logger.info("收到周度选股请求，启动 WeeklyAdvisor...")
-        report = await weekly_advisor.generate_weekly_picks()
+        logger.info(f"收到周度选股请求，启动 WeeklyAdvisor... (force={force})")
+        report = await weekly_advisor.generate_weekly_picks(force=force)
         return {
             "success": True,
             "data": report.model_dump(),
@@ -736,6 +742,59 @@ async def get_latest_weekly_report():
             "message": f"今日（{today_str}）尚未生成周度选股报告，请先调用 POST /api/weekly-advisor/generate",
         }
     )
+
+
+# ══════════════════════════════════════════════════════════════
+# V12b 组合级周内止损：运行期监控端点
+# ══════════════════════════════════════════════════════════════
+
+@app.get("/api/weekly-advisor/portfolio-stop/status")
+async def get_portfolio_stop_status():
+    """
+    查询当前活跃持仓状态（只读，不触发检查）
+    返回上次 check 的结果快照；无持仓时 status=inactive
+    """
+    state = load_active_positions()
+    return {
+        "success": True,
+        "data": state,
+        "timestamp": datetime.now().isoformat(),
+    }
+
+
+@app.get("/api/weekly-advisor/portfolio-stop/check")
+async def run_portfolio_stop_check(force_notify: bool = False):
+    """
+    立即检查一次组合级止损：抓实时价 → 算加权浮亏 → 必要时触发清仓信号
+
+    - 若组合加权浮亏 ≤ -4%，首次会推送 Telegram 警报并把 status 置为 stopped_out
+    - 已 stopped_out / inactive 的组合会直接返回当前状态
+    """
+    try:
+        result = await check_portfolio_stop(force_notify=force_notify)
+        return {
+            "success": True,
+            "data": result,
+            "timestamp": datetime.now().isoformat(),
+        }
+    except Exception as e:
+        logger.error(f"组合止损检查失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/weekly-advisor/portfolio-stop/clear")
+async def clear_portfolio_stop_state():
+    """手动清空活跃持仓（例如周五收盘后或新周期开始前）"""
+    try:
+        state = await clear_active_positions()
+        return {
+            "success": True,
+            "data": state,
+            "timestamp": datetime.now().isoformat(),
+        }
+    except Exception as e:
+        logger.error(f"清空活跃持仓失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/api/agents/decisions")
@@ -827,9 +886,21 @@ async def periodic_market_check():
                     "type": "periodic_update",
                     "data": market_overview["data"]
                 }, default=str))
+
+                # ── V12b 组合级止损：交易时段同频自动检查 ──
+                try:
+                    stop_result = await check_portfolio_stop(force_notify=False)
+                    if stop_result.get("triggered_this_call"):
+                        # 首次触发已在 check_portfolio_stop 内推送 Telegram，这里再广播一次给前端
+                        await manager.broadcast(json.dumps({
+                            "type": "portfolio_stop_triggered",
+                            "data": stop_result,
+                        }, default=str))
+                except Exception as e:
+                    logger.warning(f"组合止损自动检查失败: {e}")
         except Exception as e:
             logger.error(f"定期检查失败: {e}")
-        
+
         await asyncio.sleep(300)
 
 

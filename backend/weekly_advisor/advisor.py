@@ -18,9 +18,30 @@ from .models import (
     StockRecommendation,
     WeeklyReport,
 )
+from .portfolio_monitor import save_active_positions
 from .screener import scan_reversal_candidates
 
 logger = logging.getLogger(__name__)
+
+# ── V12 策略参数（V1→V7→V8→V9→V10→V11(废弃)→V12 迭代得出的最优配置）────
+# 半年(26周)回测 2025-10-10 ~ 2026-04-17：
+#   V12b 累计 +61.39%，夏普 0.40，最大回撤 -7.43%，最差单周 -4.00%
+#   对比 V10：+23.03% / 0.18 / -17.44% / -6.00%
+#
+# V12 相对 V10 的两处关键改动：
+#   1. 筛选收紧：反弹 >=3.5%（V10 是 2%），反转分 >=40（V10 是 >0）
+#      效果：空仓周数 3→8，避开低质量入场，累计收益翻倍
+#   2. 组合级周内止损 -4%：按持仓加权的组合当周累计回撤 <= -4% 即次日清仓
+#      效果：最差单周从 -6.00% → -4.00%，最大回撤 -17.44% → -7.43%
+V10_WEIGHTS = [0.35, 0.25, 0.20, 0.12, 0.08]  # Top1→Top5 按反转分排名加权
+V10_STOP_LOSS_PCT = -6.0                      # 单股硬止损 -6%（下单时挂出）
+V10_TARGET_PCT = 5.0                          # 目标收益 +5%
+
+# V12 新增：组合级周内追踪止损（由 portfolio_monitor 在运行期执行，
+# 周报生成后自动保存活跃持仓，交易时段每 5 分钟检查一次；亦可通过
+# /api/weekly-advisor/portfolio-stop/check 手动触发）
+V12_PORTFOLIO_STOP_PCT = -4.0                 # 组合加权回撤 <= -4% 则次日清仓
+V12_MIN_SCORE = 40                            # 反转分最低门槛（已在 screener 执行）
 
 # ── 并发锁：防止重复调用（一次完整流程约需3-5分钟）────────────────────────
 _ADVISOR_LOCK = asyncio.Lock()
@@ -66,15 +87,16 @@ PE TTM: {c.pe_ttm or 'N/A'}  PB: {c.pb or 'N/A'}  市值: {c.market_cap_b or 'N/
 
     prompt = f"""你是专业的A股反转策略投资顾问，需要生成一份反转策略周度选股报告。
 
-## 推荐标的候选（{len(top_candidates)}只，基于纯反转策略，近5日跌幅3-8%）：
+## 推荐标的候选（{len(top_candidates)}只，V12 纯反转策略：反弹≥3.5% ∧ 反转分≥40）：
 
 {chr(10).join(['---' + info for info in stocks_info])}
 
 ## 本周选股目标
 - 投资目标：下周（{_get_target_week_str()}）实现约5%的盈利
 - 目标价 = 当前价 × 1.05（取整到小数点后2位）
-- 止损价 = 当前价 × 0.97
-- 分散配置，单股仓位不超过30%
+- 止损价 = 当前价 × 0.94（单股 -6% 硬止损）
+- 分散配置：Top 5 按反转分加权 35/25/20/12/8%（服务端会覆盖 position_pct）
+- 组合保护：持仓组合周内加权回撤 ≤ -4% 应次日清仓（运行期监控，无法静态挂单）
 
 ## 要求
 请基于反转策略数据，生成结构化分析：
@@ -171,13 +193,20 @@ class WeeklyAdvisor:
     def __init__(self):
         pass
 
-    async def generate_weekly_picks(self) -> WeeklyReport:
+    async def generate_weekly_picks(self, force: bool = False) -> WeeklyReport:
         """
         生成周度选股报告（主入口）
         - 加并发锁防止重复调用
         - 同日内复用缓存结果
+        - force=True 时清除缓存，强制重新生成
         """
         today_str = datetime.now().strftime("%Y-%m-%d")
+
+        # ── 强制刷新：清除缓存 ────────────────────────────────
+        if force:
+            logger.info("weekly_advisor 收到 force=True，清除日内缓存")
+            _REPORT_CACHE["date"] = ""
+            _REPORT_CACHE["report"] = None
 
         # ── 缓存命中 ──────────────────────────────────────────
         if _REPORT_CACHE["date"] == today_str and _REPORT_CACHE["report"] is not None:
@@ -187,7 +216,7 @@ class WeeklyAdvisor:
         # ── 并发锁：同时只允许一个完整流程运行 ──────────────
         async with _ADVISOR_LOCK:
             # 再次检查缓存（等锁期间可能已生成）
-            if _REPORT_CACHE["date"] == today_str and _REPORT_CACHE["report"] is not None:
+            if not force and _REPORT_CACHE["date"] == today_str and _REPORT_CACHE["report"] is not None:
                 logger.info("weekly_advisor 等锁后命中缓存")
                 return _REPORT_CACHE["report"]
 
@@ -196,6 +225,12 @@ class WeeklyAdvisor:
             # 写入缓存
             _REPORT_CACHE["date"] = today_str
             _REPORT_CACHE["report"] = report
+
+            # ── V12b 组合级止损：锁定当期活跃持仓（供 portfolio_monitor 日常检查）──
+            try:
+                await save_active_positions(report)
+            except Exception as e:
+                logger.warning(f"保存活跃持仓失败（不影响周报）: {e}")
 
             # 推送 Telegram
             await _notify_weekly_report(report)
@@ -208,11 +243,11 @@ class WeeklyAdvisor:
         target_week = _get_target_week_str()
 
         # ════════════════════════════════════════════════════════
-        # Phase 1: 反转扫描 - 扫描全A股找出反转候选
+        # Phase 1: 反转扫描 - 全 A 股 universe（V7 策略，~5300 只）
         # ════════════════════════════════════════════════════════
         logger.info("=== Phase 1: 反转扫描 ===")
-        candidates = await scan_reversal_candidates(limit=500)
-        total_scanned = 500  # 扫描的总数
+        candidates = await scan_reversal_candidates(limit=5500)
+        total_scanned = 5500  # universe 目标（全 A 股 ~5300 + 余量）
         reversal_filtered = len(candidates)
 
         logger.info(f"Phase 1 完成: 扫描 {total_scanned} 只 → 反转候选 {reversal_filtered} 只")
@@ -231,12 +266,12 @@ class WeeklyAdvisor:
             )
 
         # ════════════════════════════════════════════════════════
-        # Phase 2: 反转评分 + LLM 周报生成 + 选出 Top 3-5 只
+        # Phase 2: 反转评分 + LLM 周报生成 + 选出 Top 5 只
         # ════════════════════════════════════════════════════════
         logger.info("=== Phase 2: 反转评分与报告生成 ===")
 
-        # 候选已按反转分排序，取 Top 3-5（至少3只，最多5只）
-        top_count = min(5, max(3, len(candidates)))
+        # 候选已按反转分排序，取 Top 5（有几只给几只；不够 5 就按实有数量）
+        top_count = min(5, len(candidates))
         top_candidates = candidates[:top_count]
 
         logger.info("反转得分排名:")
@@ -253,21 +288,24 @@ class WeeklyAdvisor:
             for analysis in llm_output.stock_analyses:
                 llm_analysis_map[analysis.code] = analysis
 
-        # ── 构建最终推荐列表 ──────────────────────────────────
+        # ── 构建最终推荐列表（V10 策略：加权仓位 + -6% 止损）──
         recommendations: List[StockRecommendation] = []
-        for candidate in top_candidates:
+        n_picks = len(top_candidates)
+        # 按反转分排名取权重前 n_picks 位，再重新归一化为百分比
+        raw_weights = V10_WEIGHTS[:n_picks]
+        weight_sum = sum(raw_weights) or 1.0
+        normalized_pcts = [round(w / weight_sum * 100.0, 1) for w in raw_weights]
+
+        for idx, candidate in enumerate(top_candidates):
             code = candidate.code
             price = candidate.price or 1.0  # 避免除零
-            target_price = round(price * 1.05, 2)
-            stop_loss_price = round(price * 0.97, 2)
+            target_price = round(price * (1.0 + V10_TARGET_PCT / 100.0), 2)   # +5%
+            stop_loss_price = round(price * (1.0 + V10_STOP_LOSS_PCT / 100.0), 2)  # -6%
 
             llm = llm_analysis_map.get(code)
 
-            # 仓位建议（等权分配，或用 LLM 建议值）
-            if llm and llm.position_pct and llm.position_pct > 0:
-                position_pct = llm.position_pct
-            else:
-                position_pct = round(100.0 / len(top_candidates), 1)
+            # V10 固定加权仓位（覆盖 LLM 建议）：Top1=35%, Top2=25%, Top3=20%, Top4=12%, Top5=8%
+            position_pct = normalized_pcts[idx]
 
             rec = StockRecommendation(
                 code=code,
@@ -287,6 +325,10 @@ class WeeklyAdvisor:
                 reversal_score=candidate.reversal_score,
                 decline_5d=candidate.decline_5d,
                 confidence=candidate.composite_score,
+                bounce_pct=candidate.bounce_pct,
+                decline_7d=candidate.decline_7d,
+                vol_ratio=candidate.vol_ratio,
+                rsi6=candidate.rsi6,
             )
             recommendations.append(rec)
 
@@ -302,7 +344,8 @@ class WeeklyAdvisor:
             risk_warning=(llm_output.risk_warning if llm_output else
                          "反转策略需要严格止损，下跌延续风险不可忽视。市场有风险，投资需谨慎。"),
             strategy_notes=(llm_output.strategy_notes if llm_output else
-                           "采用纯反转策略，关注近期跌幅3-8%、技术面超卖的标的，严格执行5%目标价和3%止损纪律。"),
+                           "V12 反转策略：反弹≥3.5%且反转分≥40 才入选，Top 5 加权 35/25/20/12/8%，"
+                           "单股 -6% 止损、+5% 目标；组合周内加权回撤 ≤ -4% 则次日清仓。"),
         )
 
         logger.info(f"=== 周报生成完成: {len(recommendations)} 只推荐股 ===")

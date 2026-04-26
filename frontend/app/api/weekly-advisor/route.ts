@@ -1,7 +1,10 @@
 import { NextResponse } from 'next/server'
 
 const BACKEND_URL = process.env.BACKEND_URL || 'http://localhost:8000'
-const TIMEOUT_MS = 180_000 // 3 分钟（LLM 生成周报较慢）
+// 8 分钟：5500 只全 A 股 K 线扫描 + LLM 周报生成。
+// 后端实际耗时 ~90-120s，但留足缓冲应对周末 eastmoney 主域名断连
+// 触发的 host fallback 与磁盘缓存路径。
+const TIMEOUT_MS = 480_000
 
 function fetchWithTimeout(url: string, options: RequestInit, ms: number) {
   const controller = new AbortController()
@@ -50,10 +53,18 @@ export async function GET() {
 }
 
 // POST: 生成新周报
-export async function POST() {
+export async function POST(request: Request) {
   try {
+    // 支持 force 参数，强制刷新缓存
+    let force = false
+    try {
+      const body = await request.json()
+      force = !!body?.force
+    } catch {}
+
+    const url = `${BACKEND_URL}/api/weekly-advisor/generate${force ? '?force=true' : ''}`
     const res = await fetchWithTimeout(
-      `${BACKEND_URL}/api/weekly-advisor/generate`,
+      url,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
