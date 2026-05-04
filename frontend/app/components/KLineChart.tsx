@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { BarChart3 } from 'lucide-react'
 import { ResponsiveContainer, ComposedChart, Bar, Line, XAxis, YAxis, Tooltip, CartesianGrid, Cell } from 'recharts'
 
@@ -40,7 +40,7 @@ export default function KLineChart({ stockCode: externalCode, stockName: externa
 
   const periodMap: Record<string, string> = { '日K': '101', '周K': '102', '月K': '103', '60分': '60' }
 
-  const fetchKline = async (code: string, klt: string) => {
+  const fetchKline = useCallback(async (code: string, klt: string) => {
     setLoading(true)
     try {
       const res = await fetch(`/api/kline?code=${code}&klt=${klt}&lmt=60`)
@@ -57,7 +57,7 @@ export default function KLineChart({ stockCode: externalCode, stockName: externa
       }
     } catch(e) { console.error(e) }
     finally { setLoading(false) }
-  }
+  }, [])
 
   // 外部 code/name 变化时同步（含名字）
   useEffect(() => {
@@ -67,11 +67,11 @@ export default function KLineChart({ stockCode: externalCode, stockName: externa
     } else if (externalName && externalName !== stockName) {
       setStockName(externalName)
     }
-  }, [externalCode, externalName])
+  }, [externalCode, externalName, stockCode, stockName])
 
   useEffect(() => {
     fetchKline(stockCode, period)
-  }, [stockCode, period])
+  }, [fetchKline, stockCode, period])
 
   const displayData = data.slice(-30)
 

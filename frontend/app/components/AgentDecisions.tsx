@@ -211,7 +211,7 @@ export default function AgentDecisions({ holdings = [], selectedCode, onSelectSt
     } finally {
       setLoading(false)
     }
-  }, [holdings.map(h => h.code).join(',')])
+  }, [holdings, onSelectStock, selectedCode])
 
   // ─── 市场精选（独立异步，不阻塞持仓分析）──────────────────
   const fetchMarketPicks = useCallback(async () => {
@@ -235,7 +235,7 @@ export default function AgentDecisions({ holdings = [], selectedCode, onSelectSt
     } finally {
       setPicksLoading(false)
     }
-  }, [holdings.map(h => h.code).join(',')])
+  }, [holdings])
 
 
   // ─── 综合统计 ─────────────────────────────────────────────

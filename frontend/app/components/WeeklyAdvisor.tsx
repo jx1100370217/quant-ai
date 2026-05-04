@@ -44,6 +44,14 @@ interface WeeklyReport {
   strategy_notes: string
 }
 
+const GENERATING_STEPS = [
+  '🔍 扫描全市场500+股票...',
+  '📉 识别上周下跌3-8%候选...',
+  '⚙️ 反转力度评分中...',
+  '📊 综合排序与筛选...',
+  '✍️ 生成反转策略周报...',
+]
+
 // ─── Helpers ───────────────────────────────────────────────
 function confidenceColor(conf: number): string {
   if (conf > 60) return 'text-green-400'
@@ -172,7 +180,6 @@ function StockCard({ stock, index }: StockCardProps) {
   const [reasonOpen, setReasonOpen] = useState(false)
   const [riskOpen, setRiskOpen] = useState(false)
 
-  const totalVotes = stock.bullish_count + stock.bearish_count + stock.neutral_count
   const targetPct = stock.current_price > 0
     ? ((stock.target_price - stock.current_price) / stock.current_price * 100)
     : 0
@@ -333,15 +340,6 @@ export default function WeeklyAdvisor() {
   const generatingRef = useRef(false)           // 稳定守卫，避免闭包陷阱
   const [error, setError] = useState<string | null>(null)
   const [generatingStep, setGeneratingStep] = useState(0)
-
-  // 生成进度提示
-  const GENERATING_STEPS = [
-    '🔍 扫描全市场500+股票...',
-    '📉 识别上周下跌3-8%候选...',
-    '⚙️ 反转力度评分中...',
-    '📊 综合排序与筛选...',
-    '✍️ 生成反转策略周报...',
-  ]
 
   useEffect(() => {
     let timer: ReturnType<typeof setInterval> | null = null

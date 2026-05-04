@@ -112,7 +112,7 @@ export default function Dashboard() {
       clearTimeout(connectTimer)
       clearInterval(portfolioTimer)
     }
-  }, [])
+  }, [fetchPortfolio])
 
   const addLog = useCallback((agent: string, message: string) => {
     setLogs(prev => [...prev, {
