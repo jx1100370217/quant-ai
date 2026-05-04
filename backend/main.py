@@ -702,7 +702,7 @@ async def analyze_holdings(body: dict):
 @app.post("/api/weekly-advisor/generate")
 async def generate_weekly_picks(force: bool = False):
     """
-    生成本周选股建议报告（四阶段：宽选→量化预筛→AI大师评审→LLM周报）
+    生成本周选股建议报告（V12b：全A股反转扫描→反转评分→Top5加权→LLM周报）
     - 包含并发锁，防止重复调用
     - 同日内结果会被缓存复用
     - force=True 时清除缓存，强制重新生成

@@ -3,6 +3,8 @@ import { readFileSync } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
 
+export const dynamic = 'force-dynamic'
+
 // 解析东方财富App的二进制Cookie文件（macOS binarycookies格式）
 function readEastMoneyCookies(): Record<string, string> {
   const cookiePath = join(

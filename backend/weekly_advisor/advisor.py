@@ -136,7 +136,7 @@ PE TTM: {c.pe_ttm or 'N/A'}  PB: {c.pb or 'N/A'}  市值: {c.market_cap_b or 'N/
         return LLMWeeklyOutput(
             market_summary="市场处于震荡行情，存在反转机会。",
             risk_warning="反转策略需要严格止损，下跌延续风险不可忽视。市场有风险，投资需谨慎。",
-            strategy_notes="采用纯反转策略，关注近期跌幅3-8%、技术面超卖的标的，严格执行5%目标价和3%止损纪律。",
+            strategy_notes="采用 V12b 纯反转策略：5日低点反弹≥3.5%且反转分≥40 才入选，严格执行+5%目标、单股-6%硬止损和组合-4%周内止损纪律。",
             stock_analyses=default_analyses,
         )
 
@@ -186,8 +186,8 @@ class WeeklyAdvisor:
     周度选股顾问 - 纯反转策略
 
     执行两阶段流程：
-    1. 反转扫描：扫描全A股，找出近5日跌幅3-8%的标的
-    2. 反转评分+LLM周报：按反转分排序，选出Top 3-5只，生成结构化周报
+    1. 反转扫描：扫描全A股约5500只，寻找5日低点反弹≥3.5%的深V候选
+    2. 反转评分+LLM周报：反转分≥40后按分数排序，选出Top 1-5只，生成结构化周报
     """
 
     def __init__(self):
@@ -288,7 +288,7 @@ class WeeklyAdvisor:
             for analysis in llm_output.stock_analyses:
                 llm_analysis_map[analysis.code] = analysis
 
-        # ── 构建最终推荐列表（V10 策略：加权仓位 + -6% 止损）──
+        # ── 构建最终推荐列表（V12b 生产组合：V10固定加权 + 单股-6% + 组合-4%）──
         recommendations: List[StockRecommendation] = []
         n_picks = len(top_candidates)
         # 按反转分排名取权重前 n_picks 位，再重新归一化为百分比
@@ -304,7 +304,7 @@ class WeeklyAdvisor:
 
             llm = llm_analysis_map.get(code)
 
-            # V10 固定加权仓位（覆盖 LLM 建议）：Top1=35%, Top2=25%, Top3=20%, Top4=12%, Top5=8%
+            # 固定加权仓位（覆盖 LLM 建议）：Top1=35%, Top2=25%, Top3=20%, Top4=12%, Top5=8%
             position_pct = normalized_pcts[idx]
 
             rec = StockRecommendation(

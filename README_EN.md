@@ -39,31 +39,28 @@ From the **top net-inflow sectors**, quantitatively pre-screen constituent stock
 ### 🏆 Master Consensus Picks (All A-Shares)
 From **5,500+ A-shares** net-inflow Top 30, quantitatively pre-screen then pass to 16 masters for analysis — not limited to any single sector, selecting the most master-endorsed picks across the entire market.
 
-### 📅 Weekly Stock Advisor (NEW)
-Fully automated four-phase stock selection system, target: **5% weekly profit**.
+### 📅 Weekly Stock Advisor (V12b)
+Fully automated two-stage mean-reversion system: scan the full A-share universe, rank deep-V rebound candidates, then generate an LLM weekly report.
 
 ```
-A-share Net Inflow Top50 + Momentum + Block Trades + Sector Leaders
+~5,500 A-shares by turnover (Eastmoney clist, paged by 100)
                     ↓
-        Phase 1: Wide Candidate Pool (~100 stocks)
+        Exclude halted / ST / delisting-risk names
                     ↓
-        Phase 2: Multi-Factor Quant Screening (8-12 stocks)
-          Technical: RSI/MACD/Bollinger/MA/Volume
-          Capital: Net inflow rate / consecutive inflow days
-          Fundamental: PE/PB/market cap liquidity
-          Momentum: 5-day gain / 20-day momentum
+        Hard filter: 5-day low rebound ≥ 3.5%
                     ↓
-        Phase 3: 16 AI Masters Review
+        V7 deep-V reversal score (minimum ≥ 40)
+          5-day rebound / 2-day momentum / 7-day decline depth
+          volume ratio / volume confirmation / ATR-price ratio / RSI6
                     ↓
-        Phase 4: Composite Scoring + LLM Weekly Report
-          Score = Quant×0.3 + Master Consensus×0.4 + Capital×0.2 + Technical×0.1
+        Rank by reversal score, select Top 1-5
                     ↓
-        ┌─────────────────────────────┐
-        │  📊 Top 3-5 Recommendations │
-        │  Target Price (+5%) / Stop Loss (-3%) │
-        │  Position Advice / Risk Warnings │
-        │  Market Overview / Strategy Notes │
-        └─────────────────────────────┘
+        Fixed weights: 35/25/20/12/8% normalized by pick count
+                    ↓
+        Target +5%; single-stock hard stop -6%
+        Portfolio weekly drawdown ≤ -4% → next-day exit signal
+                    ↓
+        LLM buy thesis / risk notes / weekly report + Telegram push
 ```
 
 ### 📊 Portfolio Analysis
@@ -93,8 +90,8 @@ One-click analysis of current holdings by all 16 masters, each independently pro
 ├──────────────────┤  Concurrency: to_thread × 4     │
 │   🔐 LLM Layer   ├────────────────────────────────┤
 │  llm/client.py   │  📅 Weekly Stock Advisor         │
-│  Structured out  │  Wide→Screen→Masters→Report      │
-│  API Key/OAuth   │  Multi-factor + LLM analysis     │
+│  Structured out  │  Full-market reversal→Top5→Report │
+│  API Key/OAuth   │  V12b + portfolio stop monitor   │
 └──────────────────┴────────────────────────────────┘
 ```
 
@@ -168,8 +165,11 @@ bash scripts/start.sh
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/weekly-advisor/generate` | POST | Generate weekly stock report (~2min) |
+| `/api/weekly-advisor/generate` | POST | Generate weekly reversal report (~90-120s) |
 | `/api/weekly-advisor/latest` | GET | Get latest weekly report (daily cache) |
+| `/api/weekly-advisor/portfolio-stop/status` | GET | Get active weekly portfolio stop state |
+| `/api/weekly-advisor/portfolio-stop/check` | GET | Check portfolio-level -4% weekly stop once |
+| `/api/weekly-advisor/portfolio-stop/clear` | POST | Clear active weekly portfolio state |
 
 ---
 
@@ -179,7 +179,7 @@ bash scripts/start.sh
 |-----------|-------------|---------------------|
 | Holdings Analysis (16 Agents) | ~80s | **~30s** |
 | All A-shares Selection | Timeout (>120s) | **~40s** |
-| Weekly Stock Report | — | **~2min** |
+| Weekly Stock Report | — | **~90-120s** |
 | LLM Model | claude-opus-4 | **claude-sonnet-4-6** |
 | LLM Concurrency | 2 | **4** |
 

@@ -37,7 +37,7 @@ class StockRecommendation(BaseModel):
     name: str = Field(description="股票名称")
     current_price: float = Field(description="当前价格")
     target_price: float = Field(description="目标价(+5%)")
-    stop_loss_price: float = Field(description="止损价(-3%)")
+    stop_loss_price: float = Field(description="单股硬止损价(-6%)")
     position_pct: float = Field(description="建议仓位占比(%)")
     buy_reason: str = Field(description="买入理由")
     risk_note: str = Field(description="风险提示")
