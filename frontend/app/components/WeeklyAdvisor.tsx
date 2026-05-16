@@ -279,13 +279,15 @@ function StockCard({ stock, index }: StockCardProps) {
           </div>
         )}
 
-        {/* 5日跌幅 */}
+        {/* 5日涨跌 */}
         {stock.decline_5d !== undefined && (
           <div className="mb-3">
             <div className="flex items-center space-x-1 text-xs">
-              <TrendingDown className="w-3 h-3 text-orange-400" />
-              <span className="text-gray-500">5日跌幅:</span>
-              <span className="font-mono font-bold text-orange-400">{stock.decline_5d.toFixed(1)}%</span>
+              <TrendingDown className={`w-3 h-3 ${stock.decline_5d > 0 ? 'text-red-400' : 'text-orange-400'}`} />
+              <span className="text-gray-500">5日涨跌:</span>
+              <span className={`font-mono font-bold ${stock.decline_5d > 0 ? 'text-red-400' : 'text-orange-400'}`}>
+                {stock.decline_5d > 0 ? '+' : ''}{stock.decline_5d.toFixed(1)}%
+              </span>
             </div>
           </div>
         )}

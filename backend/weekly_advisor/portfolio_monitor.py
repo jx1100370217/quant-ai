@@ -24,7 +24,7 @@ import asyncio
 import json
 import logging
 import os
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -108,10 +108,16 @@ async def save_active_positions(report: WeeklyReport) -> Dict[str, Any]:
 
     positions: List[Dict[str, Any]] = []
     for rec in report.recommendations:
+        snapshot_price = float(rec.current_price)
         positions.append({
             "code": rec.code,
             "name": rec.name,
-            "entry_price": float(rec.current_price),
+            # 周报生成价只作为快照；进入目标周后，监控会尽量锁定目标周首日开盘价，
+            # 避免周末/盘前生成价和真实买入价不一致导致止损判断失真。
+            "snapshot_price": snapshot_price,
+            "entry_price": snapshot_price,
+            "entry_price_source": "report_snapshot",
+            "entry_locked": False,
             "weight_pct": float(rec.position_pct),
             "single_stop_price": float(rec.stop_loss_price),
             "target_price": float(rec.target_price),
@@ -149,6 +155,57 @@ async def clear_active_positions() -> Dict[str, Any]:
 def _weight_sum(positions: List[Dict[str, Any]]) -> float:
     total = sum(float(p.get("weight_pct") or 0) for p in positions)
     return total if total > 0 else 100.0
+
+
+def _target_week_start(target_week: str) -> Optional[date]:
+    """解析 'YYYY-MM-DD ~ YYYY-MM-DD' 中的目标周首日。"""
+    try:
+        start = (target_week or "").split("~", 1)[0].strip()
+        return datetime.strptime(start, "%Y-%m-%d").date()
+    except Exception:
+        return None
+
+
+async def _lock_entry_prices_if_ready(state: Dict[str, Any]) -> None:
+    """
+    进入目标周后，把 entry_price 从周报快照价校准为目标周首日开盘价。
+
+    周报通常在周末/盘前生成，rec.current_price 是筛选日收盘或实时快照；
+    交易纪律却是“周一开盘买入”。若不校准，组合止损会低估跳空高开后的真实亏损。
+    """
+    start = _target_week_start(state.get("target_week", ""))
+    if not start or datetime.now().date() < start:
+        return
+
+    targets = [p for p in state.get("positions", []) if not p.get("entry_locked")]
+    if not targets:
+        return
+
+    async def _fetch_week_open(code: str) -> Optional[float]:
+        try:
+            klines = await eastmoney_api.get_kline_data(code, klt="101", limit=10)
+            for row in klines or []:
+                if row.get("date") == start.strftime("%Y-%m-%d"):
+                    op = float(row.get("open") or 0)
+                    return op if op > 0 else None
+        except Exception as e:
+            logger.debug(f"获取 {code} 目标周开盘价失败: {e}")
+        return None
+
+    opens = await asyncio.gather(*[_fetch_week_open(p["code"]) for p in targets])
+    locked = 0
+    for p, week_open in zip(targets, opens):
+        if not week_open:
+            continue
+        p["entry_price"] = round(float(week_open), 4)
+        p["entry_price_source"] = "target_week_open"
+        p["entry_locked"] = True
+        p["single_stop_price"] = round(float(week_open) * (1 + SINGLE_STOP_PCT / 100), 2)
+        p["target_price"] = round(float(week_open) * 1.05, 2)
+        locked += 1
+
+    if locked:
+        logger.info(f"已按目标周首日开盘价校准 entry_price：{locked}/{len(targets)}")
 
 
 def _compute_stock_pnl(entry: float, current: float) -> float:
@@ -216,6 +273,9 @@ async def check_portfolio_stop(force_notify: bool = False) -> Dict[str, Any]:
                 else f"组合已触发止损（{state.get('stop_triggered_at')}），本周不再检查"
             ),
         }
+
+    # 进入目标周后，优先把买入价锁定为目标周首日开盘价（若 K 线已可用）
+    await _lock_entry_prices_if_ready(state)
 
     # 并发拉所有股票当前价
     async def _fetch(code: str) -> Optional[Dict[str, Any]]:

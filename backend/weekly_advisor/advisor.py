@@ -19,20 +19,24 @@ from .models import (
     WeeklyReport,
 )
 from .portfolio_monitor import save_active_positions
-from .screener import scan_reversal_candidates
+from .screener import (
+    BOUNCE_FLOOR,
+    MAX_BOUNCE_PCT,
+    MAX_DECLINE_7D,
+    MAX_RECENT_GAIN_2D,
+    MAX_RSI6,
+    MIN_DECLINE_7D,
+    MIN_REVERSAL_SCORE,
+    scan_reversal_candidates,
+)
 
 logger = logging.getLogger(__name__)
 
-# ── V12 策略参数（V1→V7→V8→V9→V10→V11(废弃)→V12 迭代得出的最优配置）────
-# 半年(26周)回测 2025-10-10 ~ 2026-04-17：
-#   V12b 累计 +61.39%，夏普 0.40，最大回撤 -7.43%，最差单周 -4.00%
-#   对比 V10：+23.03% / 0.18 / -17.44% / -6.00%
-#
-# V12 相对 V10 的两处关键改动：
-#   1. 筛选收紧：反弹 >=3.5%（V10 是 2%），反转分 >=40（V10 是 >0）
-#      效果：空仓周数 3→8，避开低质量入场，累计收益翻倍
-#   2. 组合级周内止损 -4%：按持仓加权的组合当周累计回撤 <= -4% 即次日清仓
-#      效果：最差单周从 -6.00% → -4.00%，最大回撤 -17.44% → -7.43%
+# ── 策略参数（V12b 风控 + V13 防追高筛选）────────────────────────
+# V13 修复点（2026-05-15）：05-10 周推荐暴露出“高位放量暴涨股被误判为反转”。
+# 因此在 V12b 的仓位/止损框架上，筛选层恢复“先跌后弹”并加入防过热硬过滤：
+#   7 日涨跌 ∈ [-25%, -5%]、5 日低点反弹 ∈ [3.5%, 20%]、RSI6 ≤ 70、2 日涨幅 ≤ 15%。
+# 组合层仍沿用 V12b：Top5 35/25/20/12/8、单股 -6%、组合 -4%。
 V10_WEIGHTS = [0.35, 0.25, 0.20, 0.12, 0.08]  # Top1→Top5 按反转分排名加权
 V10_STOP_LOSS_PCT = -6.0                      # 单股硬止损 -6%（下单时挂出）
 V10_TARGET_PCT = 5.0                          # 目标收益 +5%
@@ -41,7 +45,7 @@ V10_TARGET_PCT = 5.0                          # 目标收益 +5%
 # 周报生成后自动保存活跃持仓，交易时段每 5 分钟检查一次；亦可通过
 # /api/weekly-advisor/portfolio-stop/check 手动触发）
 V12_PORTFOLIO_STOP_PCT = -4.0                 # 组合加权回撤 <= -4% 则次日清仓
-V12_MIN_SCORE = 40                            # 反转分最低门槛（已在 screener 执行）
+V12_MIN_SCORE = MIN_REVERSAL_SCORE            # 反转分最低门槛（已在 screener 执行）
 
 # ── 并发锁：防止重复调用（一次完整流程约需3-5分钟）────────────────────────
 _ADVISOR_LOCK = asyncio.Lock()
@@ -78,7 +82,10 @@ async def _generate_llm_report(
             f"""
 股票: {c.name}（{c.code}）
 当前价格: {c.price:.2f}元
-5日跌幅: {c.decline_5d:.2f}%
+5日涨跌: {c.decline_5d:+.2f}%
+7日涨跌: {c.decline_7d:+.2f}%
+5日低点反弹: {c.bounce_pct:.2f}%
+RSI6: {c.rsi6:.1f}
 主力净流入: {c.net_inflow/1e8:.2f}亿元
 PE TTM: {c.pe_ttm or 'N/A'}  PB: {c.pb or 'N/A'}  市值: {c.market_cap_b or 'N/A'}亿
 反转得分: {c.reversal_score:.1f}/100
@@ -87,7 +94,7 @@ PE TTM: {c.pe_ttm or 'N/A'}  PB: {c.pb or 'N/A'}  市值: {c.market_cap_b or 'N/
 
     prompt = f"""你是专业的A股反转策略投资顾问，需要生成一份反转策略周度选股报告。
 
-## 推荐标的候选（{len(top_candidates)}只，V12 纯反转策略：反弹≥3.5% ∧ 反转分≥40）：
+## 推荐标的候选（{len(top_candidates)}只，V13 防追高反转策略：反弹{BOUNCE_FLOOR:.1f}%~{MAX_BOUNCE_PCT:.0f}% ∧ 7日涨跌{MIN_DECLINE_7D:.0f}%~{MAX_DECLINE_7D:.0f}% ∧ RSI6≤{MAX_RSI6:.0f} ∧ 2日涨幅≤{MAX_RECENT_GAIN_2D:.0f}% ∧ 反转分≥{MIN_REVERSAL_SCORE}）：
 
 {chr(10).join(['---' + info for info in stocks_info])}
 
@@ -126,7 +133,7 @@ PE TTM: {c.pe_ttm or 'N/A'}  PB: {c.pb or 'N/A'}  市值: {c.market_cap_b or 'N/
         default_analyses = [
             LLMStockAnalysis(
                 code=c.code,
-                buy_reason=f"纯反转策略评分{c.reversal_score:.1f}分，近5日跌幅{c.decline_5d:.2f}%，技术面处于超卖状态，具有反转潜力。",
+                buy_reason=f"防追高反转策略评分{c.reversal_score:.1f}分，7日涨跌{c.decline_7d:+.2f}%，5日低点反弹{c.bounce_pct:.2f}%，技术面处于反转修复区。",
                 risk_note="反转策略存在延续下跌风险，请严格执行止损策略。",
                 reversal_reason=f"RSI指标超卖，成交量萎缩，价格接近支撑位，具备反转条件。",
                 position_pct=round(100.0 / len(top_candidates), 1),
@@ -136,7 +143,7 @@ PE TTM: {c.pe_ttm or 'N/A'}  PB: {c.pb or 'N/A'}  市值: {c.market_cap_b or 'N/
         return LLMWeeklyOutput(
             market_summary="市场处于震荡行情，存在反转机会。",
             risk_warning="反转策略需要严格止损，下跌延续风险不可忽视。市场有风险，投资需谨慎。",
-            strategy_notes="采用 V12b 纯反转策略：5日低点反弹≥3.5%且反转分≥40 才入选，严格执行+5%目标、单股-6%硬止损和组合-4%周内止损纪律。",
+            strategy_notes="采用 V13 防追高反转策略：7日仍处回撤区间、5日低点反弹不过热、RSI6≤70且反转分≥40 才入选；严格执行+5%目标、单股-6%硬止损和组合-4%周内止损纪律。",
             stock_analyses=default_analyses,
         )
 
@@ -160,7 +167,7 @@ async def _notify_weekly_report(report: WeeklyReport) -> None:
                 f"",
                 f"{'①②③④⑤'[i-1]} <b>{rec.name}（{rec.code}）</b>",
                 f"   现价: {rec.current_price:.2f} | 目标: {chg_arrow}{rec.target_price:.2f} | 止损: {rec.stop_loss_price:.2f}",
-                f"   跌幅: {rec.decline_5d:.2f}% | 反转分: {rec.reversal_score:.1f}/100",
+                f"   5日涨跌: {rec.decline_5d:+.2f}% | 7日涨跌: {(rec.decline_7d or 0):+.2f}% | 反转分: {rec.reversal_score:.1f}/100",
                 f"   仓位建议: {rec.position_pct:.0f}% | 置信度: {rec.confidence:.1f}%",
                 f"   📝 {rec.buy_reason[:120]}",
             ]
@@ -186,7 +193,7 @@ class WeeklyAdvisor:
     周度选股顾问 - 纯反转策略
 
     执行两阶段流程：
-    1. 反转扫描：扫描全A股约5500只，寻找5日低点反弹≥3.5%的深V候选
+    1. 反转扫描：扫描全A股约5500只，寻找“先跌后弹且不过热”的深V候选
     2. 反转评分+LLM周报：反转分≥40后按分数排序，选出Top 1-5只，生成结构化周报
     """
 
@@ -243,9 +250,9 @@ class WeeklyAdvisor:
         target_week = _get_target_week_str()
 
         # ════════════════════════════════════════════════════════
-        # Phase 1: 反转扫描 - 全 A 股 universe（V7 策略，~5300 只）
+        # Phase 1: 反转扫描 - 全 A 股 universe（V13 防追高策略，~5300 只）
         # ════════════════════════════════════════════════════════
-        logger.info("=== Phase 1: 反转扫描 ===")
+        logger.info("=== Phase 1: 防追高反转扫描 ===")
         candidates = await scan_reversal_candidates(limit=5500)
         total_scanned = 5500  # universe 目标（全 A 股 ~5300 + 余量）
         reversal_filtered = len(candidates)
@@ -277,7 +284,7 @@ class WeeklyAdvisor:
         logger.info("反转得分排名:")
         for i, c in enumerate(top_candidates, 1):
             logger.info(f"  {i}. {c.code} {c.name}: 反转{c.reversal_score:.1f} "
-                       f"(跌幅{c.decline_5d:.2f}%)")
+                       f"(5日{c.decline_5d:+.2f}%, 7日{(c.decline_7d or 0):+.2f}%)")
 
         # 调用 LLM 生成结构化周报文本
         llm_output = await _generate_llm_report(top_candidates)
@@ -315,13 +322,14 @@ class WeeklyAdvisor:
                 stop_loss_price=stop_loss_price,
                 position_pct=position_pct,
                 buy_reason=(llm.buy_reason if llm else
-                           f"纯反转策略，跌幅{candidate.decline_5d:.2f}%，反转得分{candidate.reversal_score:.1f}分，"
-                           f"技术面处于超卖状态，具有反转潜力。"),
+                           f"防追高反转策略，5日涨跌{candidate.decline_5d:+.2f}%，"
+                           f"7日涨跌{(candidate.decline_7d or 0):+.2f}%，反转得分{candidate.reversal_score:.1f}分，"
+                           f"技术面处于低位修复区。"),
                 risk_note=(llm.risk_note if llm else
                           "反转策略存在延续下跌风险，请严格执行止损策略。"),
                 reversal_reason=(llm.reversal_reason if llm else
-                               f"近5日跌幅{candidate.decline_5d:.2f}%，RSI超卖，成交量萎缩，"
-                               f"价格接近支撑位，具备反转条件。"),
+                               f"7日仍处回撤区间，5日低点反弹{(candidate.bounce_pct or 0):.2f}%且未过热，"
+                               f"RSI6={(candidate.rsi6 or 0):.1f}，具备反转修复条件。"),
                 reversal_score=candidate.reversal_score,
                 decline_5d=candidate.decline_5d,
                 confidence=candidate.composite_score,
@@ -344,8 +352,8 @@ class WeeklyAdvisor:
             risk_warning=(llm_output.risk_warning if llm_output else
                          "反转策略需要严格止损，下跌延续风险不可忽视。市场有风险，投资需谨慎。"),
             strategy_notes=(llm_output.strategy_notes if llm_output else
-                           "V12 反转策略：反弹≥3.5%且反转分≥40 才入选，Top 5 加权 35/25/20/12/8%，"
-                           "单股 -6% 止损、+5% 目标；组合周内加权回撤 ≤ -4% 则次日清仓。"),
+                           "V13 防追高反转策略：7日涨跌位于-25%~-5%，反弹3.5%~20%、RSI6≤70、反转分≥40才入选；"
+                           "Top 5 加权 35/25/20/12/8%，单股 -6% 止损、+5% 目标；组合周内加权回撤 ≤ -4% 则次日清仓。"),
         )
 
         logger.info(f"=== 周报生成完成: {len(recommendations)} 只推荐股 ===")
