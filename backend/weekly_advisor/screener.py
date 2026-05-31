@@ -1,30 +1,33 @@
 """
-反转策略筛选器 — 深 V 反弹评分（全 A 股 universe + 防追高硬过滤）
+反转策略筛选器 — 深 V 反弹评分（全 A 股 universe + V12b 量能硬过滤）
 
 历史演进：
   · V10：bounce ≥ 2%、universe = 跌幅榜
   · V12b：bounce ≥ 3.5%、universe = 三榜并集（跌幅+成交额+inflow）、
-          加入"7 日跌幅 ∈ [-25%,-5%]"和"量比 ≥ 1.2"两道硬过滤
+          加入"7 日跌幅 ∈ [-25%,-5%]"和"量比 ≥ 1.5"两道硬过滤
   · V7：保留 bounce ≥ 3.5% 唯一硬过滤，去掉 7 日 / 量比硬过滤，
         universe 扩到全 A 股（~5300）。04-17 复现通过，但 05-10 周推荐暴露
         一个硬伤：高位放量暴涨股会被误判为“反转”。
-  · V13（current）：恢复“先跌后弹”的硬约束，并加入防追高护栏：
-        7 日涨跌 ∈ [-25%, -5%]、bounce ≤ 20%、RSI6 ≤ 70、2 日涨幅 ≤ 15%。
+  · V13：在 V7 基础上加防追高护栏（bounce ≤ 20、RSI6 ≤ 70、2 日涨幅 ≤ 15%）。
+        但 05-25 周复盘发现护栏对小盘深 V 陷阱全部失效（倍杰特/联合水务大跌）。
+  · V12b（current · 2026-05-31 回滚）：撤掉 V13 防追高护栏，恢复 v12b / score_v7
+        口径——“先跌后弹 + 量比 ≥ 1.5 硬过滤”，universe 收回大中盘
+        （总市值 ≥ 100 亿，近似 backtest_v12.py 的 HS300+ZZ500 池）。
 
-评分构成（总分 ≤ 100）：
+评分构成（总分 ≤ 100，= backtest_v12.py 的 score_v7）：
   · 5 日低点反弹      0~20  （>8 → 20，>6 → 17，>4 → 13，>3 → 9，else 5）
-  · 2 日动量          0~12  （recent_gain = (close[-1]-close[-3])/close[-3]）
-  · 7 日跌幅深度      2~8   （先用作硬过滤，再按跌幅深度加分）
-  · 量比 vs MA5       4~18  （仅加分，不再用作硬过滤）
+  · 2 日动量          0~12  （recent_gain = 近两日日涨幅之和）
+  · 7 日跌幅深度      2~8
+  · 量比 vs MA5       4~18
   · 当日量 > 昨日量   +6
-  · 14 日 ATR/价格    0~12
   · RSI6 超卖         0~10  （<30 → +10，<45 → +3）
+  （2026-05-31 据多年回测删除“20日ATR/价格 0~12”加分：高波动加分纯噪声，
+    去掉后夏普 1.27→1.40、回撤 -31%→-23%、IC>0周 45%→58%。）
 
-硬过滤：
-  · 5 日低点反弹 ∈ [3.5%, 20%]
+硬过滤（v12b）：
   · 7 日涨跌 ∈ [-25%, -5%]
-  · RSI6 ≤ 70
-  · 近 2 日涨幅 ≤ 15%
+  · 5 日低点反弹 ≥ 3.5%（无上限）
+  · 量比（当日量 / 前 5 日均量）≥ 1.5   （2026-05-31 回测从 1.2 收紧到 1.5）
   · reversal_score ≥ 40 （在 _fetch_and_score 内做最终筛选）
 
 工程性安全垫（不在复现策略内，仅为生产可用）：
@@ -42,24 +45,26 @@ from .models import StockCandidate
 
 logger = logging.getLogger(__name__)
 
-# ─── 策略窗口配置 ────────────────────────────────────────
-# 打分所需的最少历史交易日；ATR 锚定 14 日窗口，bounce 锚定 5 日，
-# RSI6 锚定 7 日，留 20 日做余量。
-LOOKBACK_DAYS = 20
+# ─── 策略窗口配置（V12b / score_v7）─────────────────────────
+# v12b 评分需要 ≥30 根历史；ATR 锚定 20 日，bounce 锚定 5 日，RSI6 锚定 7 日。
+LOOKBACK_DAYS = 30
 # 拉取 K 线时多取 10 根作为缓冲
 KLINE_FETCH_LIMIT = LOOKBACK_DAYS + 10
-# Bounce 硬过滤阈值：低于 3.5% 不是有效反弹；高于 20% 多数已进入追高区
+# Bounce 硬过滤：5 日低点反弹 ≥ 3.5%（v12b 不设上限）
 BOUNCE_FLOOR = 3.5
-MAX_BOUNCE_PCT = 20.0
-# “先跌后弹”硬约束：7 日内仍需处于明确回撤区间，避免把强势追高当反转
+# “先跌后弹”硬约束：7 日内仍需处于明确回撤区间
 MIN_DECLINE_7D = -25.0
 MAX_DECLINE_7D = -5.0
-# 防过热：RSI / 两日涨幅过高时，短线反转赔率已经明显变差
-MAX_RSI6 = 70.0
-MAX_RECENT_GAIN_2D = 15.0
+# 量能硬过滤：量比（当日量 / 前 5 日均量）≥ 1.5
+# 2026-05-31 多年回测优化：从 1.2 收紧到 1.5（更强的量能确认=更高信念的反转）。
+# 样本外(2024-26) 累计 +142%→+164%、夏普 1.51→1.62，且 4/6 年不输基线、
+# 尤其救回最差的 2022/2023 弱年。≥1.8/2.0 则过紧（样本外掉到 +54%），1.5 为内部最优。
+VOL_RATIO_FLOOR = 1.5
 # 入选反转候选的最低反转分（候选层最终门槛）
 MIN_REVERSAL_SCORE = 40
-# Universe 目标规模：全 A 股 ≈ 5300，留余量
+# V12b 大中盘 universe：总市值 ≥ 100 亿（近似 HS300+ZZ500，挡住小盘脉冲陷阱）
+BLUE_CHIP_CAP = 100.0
+# Universe 目标规模：先按成交额拉全 A 股 ≈ 5300，再用市值门槛收到大中盘
 DEFAULT_UNIVERSE_LIMIT = 5500
 
 
@@ -88,8 +93,9 @@ def score_reversal(
     return_details: bool = False,
 ):
     """
-    深 V 反弹打分。当前生产版在 V7 打分基础上加入防追高硬过滤：
-    bounce 不能过小/过大，7 日必须仍处于下跌区间，RSI 和近 2 日涨幅不能过热。
+    V12b 反转打分（= backtest_v12.py 的 score_v7，bounce_floor=3.5）。
+    三道硬过滤：7 日 ∈ [-25%,-5%]（先跌）、5 日低点反弹 ≥ 3.5%（后弹）、
+    量比 ≥ 1.5（量能确认）。不带 V13 的防追高护栏。
 
     return_details=True 时返回 (score, details_dict)
     details: bounce_pct / decline_7d / vol_ratio / rsi6
@@ -102,14 +108,35 @@ def score_reversal(
     if len(closes) < LOOKBACK_DAYS:
         return _return(0.0, details)
 
-    # ── 硬过滤 1：5 日低点反弹必须足够，但不能已经涨过头 ─────────
+    # ── 硬过滤 1：7 日必须仍处回撤区间，确保“先跌” ─────────────
+    decline_7d = (
+        (closes[-1] - closes[-8]) / closes[-8] * 100
+        if len(closes) >= 8 and closes[-8] > 0 else 0.0
+    )
+    details["decline_7d"] = round(float(decline_7d), 2)
+    if decline_7d > MAX_DECLINE_7D or decline_7d < MIN_DECLINE_7D:
+        return _return(0.0, details)
+
+    # ── 硬过滤 2：5 日低点反弹 ≥ 3.5%（后弹，v12b 无上限）─────────
     if lows is not None and len(lows) >= 5:
         low_5d = float(np.min(lows[-5:]))
     else:
         low_5d = float(np.min(closes[-5:]))
     bounce = (closes[-1] - low_5d) / low_5d * 100 if low_5d > 0 else 0.0
     details["bounce_pct"] = round(float(bounce), 2)
-    if bounce < BOUNCE_FLOOR or bounce > MAX_BOUNCE_PCT:
+    if bounce < BOUNCE_FLOOR:
+        return _return(0.0, details)
+
+    # ── 硬过滤 3：量比 ≥ 1.5（v12b 量能确认）──────────────────
+    if len(volumes) >= 6:
+        avg_vol_5d = float(np.mean(volumes[-6:-1]))
+    elif len(volumes) >= 2:
+        avg_vol_5d = float(np.mean(volumes[:-1]))
+    else:
+        avg_vol_5d = 0.0
+    vol_ratio = float(volumes[-1]) / avg_vol_5d if avg_vol_5d > 0 else 0.0
+    details["vol_ratio"] = round(float(vol_ratio), 2)
+    if avg_vol_5d > 0 and vol_ratio < VOL_RATIO_FLOOR:
         return _return(0.0, details)
 
     # ── 评分项 1：bounce 强度（0-20）─────────────────────────
@@ -125,27 +152,16 @@ def score_reversal(
     else:
         score += 5
 
-    # ── 评分项 2：2 日动量（0-12）───────────────────────────
-    recent_gain = (
-        (closes[-1] - closes[-3]) / closes[-3] * 100
-        if len(closes) >= 3 and closes[-3] > 0 else 0.0
-    )
-    # 短线涨幅过大时，已从“反转早期”变成“追高后段”
-    if recent_gain > MAX_RECENT_GAIN_2D:
-        return _return(0.0, details)
+    # ── 评分项 2：2 日动量（0-12）= 近两日日涨幅之和（score_v7 口径）──
+    day1 = (closes[-1] - closes[-2]) / closes[-2] * 100 if len(closes) >= 2 and closes[-2] > 0 else 0.0
+    day2 = (closes[-2] - closes[-3]) / closes[-3] * 100 if len(closes) >= 3 and closes[-3] > 0 else 0.0
+    recent_gain = day1 + day2
     if recent_gain > 6:
         score += 12
     elif recent_gain > 2:
         score += 7
 
-    # ── 硬过滤 2 + 评分项 3：7 日必须仍是下跌区间，确保“先跌后弹” ──
-    decline_7d = (
-        (closes[-1] - closes[-8]) / closes[-8] * 100
-        if len(closes) >= 8 and closes[-8] > 0 else 0.0
-    )
-    details["decline_7d"] = round(float(decline_7d), 2)
-    if decline_7d < MIN_DECLINE_7D or decline_7d > MAX_DECLINE_7D:
-        return _return(0.0, details)
+    # ── 评分项 3：7 日跌幅深度（2-8）────────────────────────
     if decline_7d < -15:
         score += 8
     elif decline_7d < -10:
@@ -155,15 +171,7 @@ def score_reversal(
     else:
         score += 2
 
-    # ── 评分项 4：量比 vs MA5（仅加分，不硬过滤）（4-18）────
-    if len(volumes) >= 6:
-        avg_vol_5d = float(np.mean(volumes[-6:-1]))
-    elif len(volumes) >= 2:
-        avg_vol_5d = float(np.mean(volumes[:-1]))
-    else:
-        avg_vol_5d = 0.0
-    vol_ratio = float(volumes[-1]) / avg_vol_5d if avg_vol_5d > 0 else 1.0
-    details["vol_ratio"] = round(vol_ratio, 2)
+    # ── 评分项 4：量比 vs MA5（4-18）────────────────────────
     if vol_ratio > 3.0:
         score += 18
     elif vol_ratio > 2.0:
@@ -177,20 +185,14 @@ def score_reversal(
     if len(volumes) >= 2 and volumes[-1] > volumes[-2]:
         score += 6
 
-    # ── 评分项 6：14 日 ATR / 价格（0-12）───────────────────
-    if highs is not None and lows is not None and len(highs) >= 14:
-        atr = float(np.mean(highs[-14:] - lows[-14:]))
-        atr_ratio = atr / closes[-1] * 100 if closes[-1] > 0 else 0.0
-        if atr_ratio > 5:
-            score += 12
-        elif atr_ratio > 3:
-            score += 6
+    # ── （已移除）20 日 ATR / 价格加分 ─────────────────────────
+    # 2026-05-31 多年回测（266周·HS300+ZZ500）证据：原 ATR(高波动)加分纯属
+    # 噪声——去掉后夏普 1.27→1.40、最大回撤 -31%→-23%、IC>0 周占比 45%→58%、
+    # 累计反而 +575%→+630%。高波动票只增加方差、不增加收益，故删除该项。
 
-    # ── 硬过滤 3 + 评分项 7：RSI6 过热直接排除，低位/修复才加分 ─────
+    # ── 评分项 6：RSI6 超卖加分（v12b 不设上限护栏）─────────────
     rsi6 = _calc_rsi(closes, 6)
     details["rsi6"] = round(float(rsi6), 1)
-    if rsi6 > MAX_RSI6:
-        return _return(0.0, details)
     if rsi6 < 30:
         score += 10
     elif rsi6 < 45:
@@ -201,23 +203,23 @@ def score_reversal(
 
 
 # ─────────────────────────────────────────────────────────────
-# 反转候选扫描 — 全 A 股 universe + V7 打分
+# 反转候选扫描 — V12b 大中盘 universe + score_v7 打分
 # ─────────────────────────────────────────────────────────────
 
 async def scan_reversal_candidates(limit: int = DEFAULT_UNIVERSE_LIMIT) -> List[StockCandidate]:
     """
-    扫描全 A 股反转候选（防追高反转策略 · 全市场扫描）：
+    扫描 V12b 大中盘反转候选：
 
-    1. Universe：通过 eastmoney `clist` 接口按成交额降序拉取全市场（~5300 只），
-       用 amount 排序仅是为了把停牌/废弃股排到最后；本质等价"全 A 股"。
-    2. 每只取近 KLINE_FETCH_LIMIT (=30) 根日线
-    3. score_reversal 打分（先跌后弹 + 防过热硬过滤）
+    1. Universe：eastmoney `clist` 按成交额降序拉全 A 股（~5300 只），再用
+       总市值 ≥ BLUE_CHIP_CAP(100亿) 过滤成大中盘池（近似 HS300+ZZ500）。
+    2. 每只取近 KLINE_FETCH_LIMIT (=40) 根日线
+    3. score_reversal 打分（先跌后弹 + 量比 ≥ 1.5 硬过滤）
     4. 反转分 ≥ 40 入选；按反转分降序返回
     """
-    logger.info(f"反转策略扫描：全 A 股 universe target ≈ {limit}")
+    logger.info(f"反转策略扫描：V12b 大中盘 universe（先拉全 A 股 ≈ {limit}，再筛市值≥{BLUE_CHIP_CAP:.0f}亿）")
 
     try:
-        # 全 A 股 universe —— 一次性拉取，按成交额降序（保证流动性头部覆盖完整）
+        # 先按成交额降序拉全 A 股 —— 保证流动性头部覆盖完整
         stocks = await eastmoney_api.get_top_stocks_market_wide(
             limit=limit, sort_by="amount"
         )
@@ -233,7 +235,15 @@ async def scan_reversal_candidates(limit: int = DEFAULT_UNIVERSE_LIMIT) -> List[
                 stocks_by_code[code] = s
         stocks = list(stocks_by_code.values())
 
-        logger.info(f"universe 实际规模 {len(stocks)} 只（全 A 股 by amount 降序）")
+        # ── V12b 大中盘过滤：总市值 ≥ BLUE_CHIP_CAP 亿（近似 HS300+ZZ500）──
+        # 这是 V12b 真正挡住小盘脉冲陷阱的那一刀；全 A 股 universe 会放进
+        # 联合水务(48亿)/倍杰特(63亿) 这类小盘深 V，市值门槛把它们排除。
+        before_cap = len(stocks)
+        stocks = [s for s in stocks if (s.get("market_cap_b") or 0) >= BLUE_CHIP_CAP]
+        logger.info(
+            f"universe 大中盘过滤：{before_cap} → {len(stocks)} 只"
+            f"（市值≥{BLUE_CHIP_CAP:.0f}亿，近似 HS300+ZZ500）"
+        )
 
         # 并发拉 K 线 + 打分（限流 24，配合 eastmoney._REQUEST_SEMAPHORE=24）
         # 历史值 8 在 5500 只全 A 股 universe 下需 5+ 分钟，超过前端 3min 超时；
