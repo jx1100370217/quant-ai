@@ -1,6 +1,6 @@
 # 🤖 QuantAI — AI量化交易分析系统
 
-> A股反转因子策略 + 16位AI投资大师协作 + LLM智能周报，全自动量化选股
+> A股个股反转 + 具体公募基金优选 + 主流加密货币横向排名，统一的多资产周推荐研究终端
 
 [![Python](https://img.shields.io/badge/Python-3.10+-blue)](https://python.org)
 [![Next.js](https://img.shields.io/badge/Next.js-14-black)](https://nextjs.org)
@@ -72,7 +72,13 @@
 
 ### 📅 周度选股顾问
 
-全自动两阶段反转选股系统：全A股行情拉取后筛选市值≥100亿元的大中盘股票 → 最多5只现金感知组合 + LLM报告生成，结果自动推送至 Telegram，并记录活跃持仓用于组合级 -4% 周内止损监控。
+周推荐已扩展为三条相互独立的策略线：
+
+- **A股个股**：大中盘股票反转因子，最多5只现金感知组合 + 事实约束 LLM 报告。
+- **具体公募基金**：横向比较“财通成长优选混合C”等主动权益基金的具体份额，综合1周/1月/3月收益、20/60日趋势、正收益周占比、波动和回撤，输出最多5只产品及研究组合权重。
+- **主流加密货币**：在 BTC、ETH、SOL 等高流动性币种中，综合7/30日动量、20/60日均线、量能、波动和回撤，输出风险调整后的盈利空间排名及最多3只币种。
+
+三类资产使用独立策略版本、缓存和审计流水，前端可在同一模块内切换；基金与加密货币报告不依赖 LLM，所有信号均可由行情数据复算。基金数据来自天天基金公开净值，加密货币数据来自 Binance 公开市场日线。
 
 ### 🧭 无账户依赖的研究终端
 
@@ -196,6 +202,10 @@ cd frontend && npm run dev
 |------|------|------|
 | `/api/weekly-advisor/generate` | POST | 生成反转选股报告（约90-120s，前端超时保护8min） |
 | `/api/weekly-advisor/latest` | GET | 获取最新一期周报（当日缓存） |
+| `/api/weekly-advisor/fund/generate` | POST | 横向比较具体公募基金并生成周推荐 |
+| `/api/weekly-advisor/fund/latest` | GET | 获取最新具体基金周推荐 |
+| `/api/weekly-advisor/crypto/generate` | POST | 横向比较主流加密币并生成周推荐 |
+| `/api/weekly-advisor/crypto/latest` | GET | 获取最新加密货币周推荐 |
 | `/api/weekly-advisor/portfolio-stop/status` | GET | 查看当前周度推荐组合止损状态 |
 | `/api/weekly-advisor/portfolio-stop/check` | GET | 手动检查一次组合级 -4% 周内止损 |
 | `/api/weekly-advisor/portfolio-stop/clear` | POST | 手动清空活跃推荐组合状态 |
@@ -286,8 +296,12 @@ quant-ai/
 │   │   ├── technical_analyst.py
 │   │   ├── risk_manager.py
 │   │   └── ...（共16个）
-│   ├── weekly_advisor/         # 📅 反转策略选股顾问模块
+│   ├── weekly_advisor/         # 📅 个股、基金、加密货币周推荐模块
 │   │   ├── advisor.py          # 核心顾问（反转扫描→评分→LLM周报）
+│   │   ├── fund_advisor.py     # 具体公募基金净值动量与风险评分
+│   │   ├── crypto_advisor.py   # 主流加密币跨币种盈利空间排名
+│   │   ├── asset_models.py     # 基金与加密货币报告模型
+│   │   ├── asset_report_store.py # 多资产报告持久化与审计流水
 │   │   ├── screener.py         # 深V反弹筛选器（bounce/动量/量比/RSI6）
 │   │   ├── portfolio_monitor.py # V12b 组合级 -4% 周内止损监控
 │   │   ├── strategy.py         # 策略参数唯一来源 + 现金感知仓位
@@ -307,7 +321,9 @@ quant-ai/
 ├── frontend/
 │   ├── app/
 │   │   ├── components/
-│   │   │   ├── WeeklyAdvisor.tsx    # 📅 反转选股顾问面板
+│   │   │   ├── WeeklyAdvisor.tsx    # 📅 三资产周推荐入口
+│   │   │   ├── FundWeeklyAdvisor.tsx # 具体公募基金对比面板
+│   │   │   ├── BitcoinWeeklyAdvisor.tsx # 主流加密货币排名面板
 │   │   │   ├── SectorFlow.tsx       # 行业轮动资金流向
 │   │   │   ├── StrategyTelemetry.tsx # 策略遥测与现金缓冲
 │   │   │   ├── MarketOverview.tsx   # 市场行情
@@ -356,7 +372,11 @@ _MIN_INTERVAL = 0.3                       # 调用间最小间隔(秒)
 
 ## 📋 更新日志
 
-### v2.3 — 执行真实性与前瞻数据基线
+### v2.3 — 多资产周推荐与执行真实性基线
+- 新增具体公募基金周推荐：比较34只主动权益C类份额，输出风险调整后的产品排名
+- 新增主流加密货币周推荐：比较16个高流动性USDT现货币种，输出最多3个币种
+- 基金净值支持分页获取、缓存降级、申赎状态过滤；加密行情使用Binance公共日线
+- 前端统一为A股个股、具体公募基金、加密货币三资产切换，不读取真实账户持仓
 - 回测加入双边佣金、滑点和分阶段卖出印花税
 - 开盘涨停不假设买入；跌停、停牌和一字跌停延迟退出
 - 周五组合风险信号允许跨周到下一可成交日执行

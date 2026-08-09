@@ -48,6 +48,10 @@ from strategies.multi_factor import MultiFactorStrategy
 from utils.helpers import format_number, calculate_returns, get_trading_dates
 from utils.telegram import notify_full_analysis, notify_market_picks, notify_holdings_analysis
 from weekly_advisor.advisor import WeeklyAdvisor
+from weekly_advisor.asset_models import CryptoWeeklyReport, FundWeeklyReport
+from weekly_advisor.asset_report_store import load_latest_asset_report
+from weekly_advisor.crypto_advisor import crypto_weekly_advisor
+from weekly_advisor.fund_advisor import fund_weekly_advisor
 from weekly_advisor.portfolio_monitor import (
     check_portfolio_stop,
     clear_active_positions,
@@ -753,6 +757,84 @@ async def get_latest_weekly_report():
             "success": False,
             "message": f"尚无持久化周度选股报告（查询日期 {today_str}），请先生成一次报告",
         }
+    )
+
+
+@app.post("/api/weekly-advisor/fund/generate")
+async def generate_fund_weekly_report(force: bool = False):
+    """横向比较具体公募基金并生成周推荐。"""
+    try:
+        logger.info("收到公募基金周推荐请求 (force=%s)", force)
+        report = await fund_weekly_advisor.generate(force=force)
+        return {
+            "success": True,
+            "data": report.model_dump(),
+            "timestamp": datetime.now().isoformat(),
+        }
+    except Exception as exc:
+        logger.error("公募基金周推荐生成失败: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/weekly-advisor/fund/latest")
+async def get_latest_fund_weekly_report():
+    """读取最新公募基金周推荐，优先内存、其次本地持久化。"""
+    from weekly_advisor.fund_advisor import _FUND_REPORT_CACHE
+
+    today = datetime.now().strftime("%Y-%m-%d")
+    cached = _FUND_REPORT_CACHE.get("report")
+    if _FUND_REPORT_CACHE.get("date") == today and cached is not None:
+        return {"success": True, "data": cached.model_dump(), "from_cache": True}
+    persisted = load_latest_asset_report(FundWeeklyReport, "fund")
+    if persisted is not None:
+        return {
+            "success": True,
+            "data": persisted.model_dump(),
+            "from_persistent_store": True,
+        }
+    return JSONResponse(
+        status_code=404,
+        content={"success": False, "message": "尚无公募基金周推荐，请先生成一次报告"},
+    )
+
+
+@app.post("/api/weekly-advisor/crypto/generate")
+@app.post("/api/weekly-advisor/bitcoin/generate", include_in_schema=False)
+async def generate_crypto_weekly_report(force: bool = False):
+    """横向比较主流加密币并生成周推荐；bitcoin 路径保留为兼容别名。"""
+    try:
+        logger.info("收到加密货币周推荐请求 (force=%s)", force)
+        report = await crypto_weekly_advisor.generate(force=force)
+        return {
+            "success": True,
+            "data": report.model_dump(),
+            "timestamp": datetime.now().isoformat(),
+        }
+    except Exception as exc:
+        logger.error("加密货币周推荐生成失败: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/weekly-advisor/crypto/latest")
+@app.get("/api/weekly-advisor/bitcoin/latest", include_in_schema=False)
+async def get_latest_crypto_weekly_report():
+    """读取最新加密货币周报告；bitcoin 路径保留为兼容别名。"""
+    from weekly_advisor.crypto_advisor import _CRYPTO_REPORT_CACHE
+
+    today = datetime.now().strftime("%Y-%m-%d")
+    cached = _CRYPTO_REPORT_CACHE.get("report")
+    if _CRYPTO_REPORT_CACHE.get("date") == today and cached is not None:
+        return {"success": True, "data": cached.model_dump(), "from_cache": True}
+    persisted = load_latest_asset_report(CryptoWeeklyReport, "crypto")
+    if persisted is not None:
+        return {
+            "success": True,
+            "data": persisted.model_dump(),
+            "from_persistent_store": True,
+        }
+    return JSONResponse(
+        status_code=404,
+        content={"success": False, "message": "尚无加密货币周推荐，请先生成一次报告"},
     )
 
 

@@ -5,6 +5,17 @@ const BACKEND_URL = process.env.BACKEND_URL || 'http://localhost:8000'
 // 后端实际耗时 ~90-120s，但留足缓冲应对周末 eastmoney 主域名断连
 // 触发的 host fallback 与磁盘缓存路径。
 const TIMEOUT_MS = 480_000
+type Asset = 'stock' | 'fund' | 'crypto'
+
+function normalizeAsset(value: unknown): Asset {
+  if (value === 'bitcoin') return 'crypto'
+  return value === 'fund' || value === 'crypto' ? value : 'stock'
+}
+
+function backendPath(asset: Asset, action: 'latest' | 'generate') {
+  if (asset === 'stock') return `/api/weekly-advisor/${action}`
+  return `/api/weekly-advisor/${asset}/${action}`
+}
 
 function fetchWithTimeout(url: string, options: RequestInit, ms: number) {
   const controller = new AbortController()
@@ -14,10 +25,11 @@ function fetchWithTimeout(url: string, options: RequestInit, ms: number) {
 }
 
 // GET: 获取最新周报
-export async function GET() {
+export async function GET(request: Request) {
   try {
+    const asset = normalizeAsset(new URL(request.url).searchParams.get('asset'))
     const res = await fetchWithTimeout(
-      `${BACKEND_URL}/api/weekly-advisor/latest`,
+      `${BACKEND_URL}${backendPath(asset, 'latest')}`,
       { cache: 'no-store' },
       30_000
     )
@@ -57,12 +69,14 @@ export async function POST(request: Request) {
   try {
     // 支持 force 参数，强制刷新缓存
     let force = false
+    let asset: Asset = 'stock'
     try {
       const body = await request.json()
       force = !!body?.force
+      asset = normalizeAsset(body?.asset)
     } catch {}
 
-    const url = `${BACKEND_URL}/api/weekly-advisor/generate${force ? '?force=true' : ''}`
+    const url = `${BACKEND_URL}${backendPath(asset, 'generate')}${force ? '?force=true' : ''}`
     const res = await fetchWithTimeout(
       url,
       {

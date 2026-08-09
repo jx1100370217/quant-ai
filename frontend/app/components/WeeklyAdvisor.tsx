@@ -6,8 +6,11 @@ import {
   TrendingUp, TrendingDown, Minus, AlertTriangle, BookOpen,
   Target, ShieldAlert, BarChart3, Sparkles, ScanSearch,
   Table as TableIcon,
+  Layers3, Bitcoin,
 } from 'lucide-react'
 import { getMarketTone } from '../lib/marketColors'
+import FundWeeklyAdvisor from './FundWeeklyAdvisor'
+import CryptoWeeklyAdvisor from './BitcoinWeeklyAdvisor'
 
 // ─── Types ─────────────────────────────────────────────────
 interface StockRecommendation {
@@ -349,7 +352,7 @@ function StockCard({ stock, index }: StockCardProps) {
 }
 
 // ─── Main Component ────────────────────────────────────────
-export default function WeeklyAdvisor() {
+function StockWeeklyAdvisor() {
   const [report, setReport] = useState<WeeklyReport | null>(null)
   const [loading, setLoading] = useState(false)
   const [generating, setGenerating] = useState(false)
@@ -373,7 +376,7 @@ export default function WeeklyAdvisor() {
     setLoading(true)
     setError(null)
     try {
-      const res = await fetch('/api/weekly-advisor')
+      const res = await fetch('/api/weekly-advisor?asset=stock')
       const data = await res.json()
       if (data.success && data.data) {
         setReport(data.data)
@@ -400,7 +403,7 @@ export default function WeeklyAdvisor() {
       const res = await fetch('/api/weekly-advisor', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ force: true }),
+        body: JSON.stringify({ force: true, asset: 'stock' }),
       })
       const data = await res.json()
       // 若后端缓存秒回，至少展示 800ms 加载态，让用户感知到"已刷新"
@@ -465,7 +468,7 @@ export default function WeeklyAdvisor() {
           <div className="panel-kicker">WEEKLY SIGNAL OUTPUT</div>
           <div className="mt-2 flex flex-wrap items-center gap-2.5">
             <CalendarDays className="h-5 w-5 text-cyan-400" />
-            <h2 className="text-xl font-semibold text-white">周度选股信号</h2>
+            <h2 className="text-xl font-semibold text-white">A股个股周度信号</h2>
             {report?.target_week && (
               <span className="rounded border border-slate-700/60 bg-slate-950/50 px-2 py-0.5 font-mono text-[10px] text-slate-500">
                 {report.target_week}
@@ -660,6 +663,61 @@ export default function WeeklyAdvisor() {
           )}
         </div>
       )}
+    </div>
+  )
+}
+
+type WeeklyAsset = 'stock' | 'fund' | 'crypto'
+
+const ASSET_TABS: Array<{
+  key: WeeklyAsset
+  label: string
+  hint: string
+  icon: typeof BarChart3
+}> = [
+  { key: 'stock', label: 'A股个股', hint: '反转因子', icon: BarChart3 },
+  { key: 'fund', label: '公募基金', hint: '具体产品对比', icon: Layers3 },
+  { key: 'crypto', label: '加密货币', hint: '多币种盈利空间', icon: Bitcoin },
+]
+
+export default function WeeklyAdvisor() {
+  const [asset, setAsset] = useState<WeeklyAsset>('stock')
+
+  return (
+    <div className="space-y-3">
+      <div className="quant-panel relative overflow-hidden p-2">
+        <div className="panel-corner panel-corner-tr" />
+        <div className="grid grid-cols-3 gap-2" role="tablist" aria-label="周推荐资产类型">
+          {ASSET_TABS.map(item => {
+            const Icon = item.icon
+            const active = asset === item.key
+            return (
+              <button
+                key={item.key}
+                type="button"
+                role="tab"
+                aria-selected={active}
+                onClick={() => setAsset(item.key)}
+                className={`group flex min-w-0 items-center justify-center gap-2 rounded-xl border px-3 py-3 text-left transition-all sm:justify-start ${
+                  active
+                    ? 'border-cyan-400/35 bg-cyan-400/[0.1] shadow-[inset_0_0_24px_rgba(34,211,238,0.04)]'
+                    : 'border-transparent bg-slate-950/20 hover:border-slate-700/60 hover:bg-slate-900/60'
+                }`}
+              >
+                <Icon className={`h-4 w-4 shrink-0 ${active ? 'text-cyan-300' : 'text-slate-600 group-hover:text-slate-400'}`} />
+                <span className="min-w-0">
+                  <span className={`block truncate text-xs font-semibold sm:text-sm ${active ? 'text-white' : 'text-slate-500'}`}>{item.label}</span>
+                  <span className={`hidden font-mono text-[9px] tracking-wider sm:block ${active ? 'text-cyan-600' : 'text-slate-700'}`}>{item.hint}</span>
+                </span>
+              </button>
+            )
+          })}
+        </div>
+      </div>
+
+      {asset === 'stock' && <StockWeeklyAdvisor />}
+      {asset === 'fund' && <FundWeeklyAdvisor />}
+      {asset === 'crypto' && <CryptoWeeklyAdvisor />}
     </div>
   )
 }
