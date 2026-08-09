@@ -1,12 +1,5 @@
 import type { Metadata, Viewport } from 'next'
-import { Inter } from 'next/font/google'
 import './globals.css'
-
-const inter = Inter({ 
-  subsets: ['latin'],
-  display: 'swap',
-  variable: '--font-inter',
-})
 
 export const viewport: Viewport = {
   width: 'device-width',
@@ -15,8 +8,8 @@ export const viewport: Viewport = {
 }
 
 export const metadata: Metadata = {
-  title: 'QuantAI - 量化交易AI系统',
-  description: '基于AI多Agent的智能量化交易系统',
+  title: 'QuantAI - 周度量化信号研究终端',
+  description: '面向A股周频反转策略的量化研究与选股信号终端',
 }
 
 export default function RootLayout({
@@ -25,14 +18,14 @@ export default function RootLayout({
   children: React.ReactNode
 }) {
   return (
-    <html lang="zh-CN" className={`${inter.variable} dark`}>
+    <html lang="zh-CN" className="dark">
       <head />
-      <body className={`${inter.className} antialiased`}>
+      <body className="antialiased">
         {/* Loading indicator */}
         <div id="loading-indicator" className="fixed top-0 left-0 w-full h-1 bg-gradient-to-r from-cyan-500 to-blue-500 z-50 opacity-0 transition-opacity duration-300"></div>
         
         {/* Main app container */}
-        <div className="min-h-screen bg-dark-900 text-white">
+        <div className="min-h-screen bg-[#02060b] text-white">
           {/* Background effects */}
           <div className="fixed inset-0 pointer-events-none">
             {/* Animated background gradients */}

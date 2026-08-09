@@ -51,11 +51,12 @@ from weekly_advisor.screener import (  # noqa: E402
     VOL_RATIO_FLOOR,
     scan_reversal_candidates,
 )
+from weekly_advisor.strategy import STRATEGY, allocate_rank_weights  # noqa: E402
 
 # V12b Top-5 固定权重 & 止损参数（和 backend/weekly_advisor/advisor.py 保持一致）
-WEIGHTS = [0.35, 0.25, 0.20, 0.12, 0.08]
-SINGLE_STOP_PCT = -6.0
-PORTFOLIO_STOP_PCT = -4.0
+WEIGHTS = list(STRATEGY.rank_weights)
+SINGLE_STOP_PCT = STRATEGY.single_stop_pct
+PORTFOLIO_STOP_PCT = STRATEGY.portfolio_stop_pct
 MIN_SCORE = MIN_REVERSAL_SCORE
 
 
@@ -97,6 +98,7 @@ async def main(limit: int) -> int:
 
     # 候选已按反转分排序；按权重取 Top 5
     top = candidates[:min(5, len(candidates))]
+    position_pcts, cash_position_pct = allocate_rank_weights(len(top))
 
     print(f"通过过滤 {len(candidates)} 只 · 本次推荐 Top {len(top)} 只")
     print()
@@ -107,7 +109,7 @@ async def main(limit: int) -> int:
           f"{'反弹%':<8}{'7日%':<8}{'量比':<7}{'RSI6':<6}")
     print("-" * 95)
     for i, c in enumerate(top, 1):
-        w = WEIGHTS[i - 1] * 100
+        w = position_pcts[i - 1]
         print(f"{i:<4}{w:>4.0f}%  {c.code:<13}{c.name:<12}"
               f"{c.reversal_score:<7.0f}{c.price:<9.2f}"
               f"{fmt(c.bounce_pct):<8}{fmt(c.decline_7d, signed=True):<8}"
@@ -115,6 +117,7 @@ async def main(limit: int) -> int:
     print()
 
     print("【交易执行提示】")
+    print(f"  • 股票总仓位：{sum(position_pcts):.0f}%｜保留现金：{cash_position_pct:.0f}%（候选不足不摊满）")
     print(f"  • 单股挂单止损价：买入价 × (1 + {SINGLE_STOP_PCT}/100) = × 0.94 (触发即市价出)")
     print(f"  • 组合级监控：每日收盘前计算组合加权涨跌，≤ {PORTFOLIO_STOP_PCT}% 则次日开盘清仓")
     print(f"  • 持仓期：{buy_day} 开盘 → {sell_day} 收盘（若未触发止损）")

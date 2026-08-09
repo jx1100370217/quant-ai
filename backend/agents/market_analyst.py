@@ -30,7 +30,9 @@ class MarketAnalyst(BaseAgent):
 
         # 主要指数
         try:
-            quotes = await eastmoney_api.get_batch_quotes(["000001", "399001", "399006"])
+            quotes = await eastmoney_api.get_batch_quotes(
+                ["000001.SH", "399001.SZ", "399006.SZ"]
+            )
             result["indices"] = {
                 code: {
                     "name": q.get("name", code),

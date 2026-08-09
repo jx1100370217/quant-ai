@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 from config import config
@@ -59,11 +60,57 @@ def _universe_cache_path(sort_by: str) -> Path:
     return _UNIVERSE_CACHE_DIR / f"{sort_by}.json"
 
 
-def _save_universe_cache(sort_by: str, data: List[Dict]):
+def _atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _save_universe_cache(
+    sort_by: str,
+    data: List[Dict],
+    requested_limit: Optional[int] = None,
+    failed_pages: int = 0,
+):
+    """保存容错缓存；完整实时批次另存不可覆盖的 point-in-time 快照。"""
     try:
         _UNIVERSE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        payload = {"timestamp": time.time(), "sort_by": sort_by, "count": len(data), "data": data}
-        _universe_cache_path(sort_by).write_text(json.dumps(payload, ensure_ascii=False))
+        captured_at = datetime.now().astimezone()
+        requested = int(requested_limit or len(data) or 0)
+        coverage_ratio = len(data) / requested if requested > 0 else 0.0
+        payload = {
+            "timestamp": time.time(),
+            "captured_at": captured_at.isoformat(timespec="seconds"),
+            "snapshot_date": captured_at.date().isoformat(),
+            "sort_by": sort_by,
+            "count": len(data),
+            "requested_limit": requested,
+            "coverage_ratio": round(coverage_ratio, 4),
+            "failed_pages": failed_pages,
+            "data": data,
+        }
+        _atomic_write_json(_universe_cache_path(sort_by), payload)
+
+        # 只有覆盖率>=90%且分页无失败的实时批次才有资格成为研究快照；
+        # fallback/部分成功数据仍可用于应用容错，但绝不能伪装成完整历史股票池。
+        if requested > 0 and coverage_ratio >= 0.90 and failed_pages == 0:
+            codes_key = ",".join(sorted(str(item.get("code", "")) for item in data))
+            import hashlib
+
+            digest = hashlib.sha256(codes_key.encode("utf-8")).hexdigest()[:10]
+            stamp = captured_at.strftime("%H%M%S")
+            snapshot_path = (
+                _UNIVERSE_CACHE_DIR / "history" / captured_at.date().isoformat()
+                / f"{sort_by}-{stamp}-{digest}.json"
+            )
+            if not snapshot_path.exists():
+                snapshot_payload = {
+                    **payload,
+                    "source": "eastmoney_live",
+                    "point_in_time_eligible": True,
+                }
+                _atomic_write_json(snapshot_path, snapshot_payload)
     except Exception as e:
         logger.debug(f"保存 universe 缓存失败 sort_by={sort_by}: {e}")
 
@@ -142,23 +189,43 @@ def _make_session() -> _SharedSessionCtx:
 
 class EastmoneyAPI:
     """东方财富API接口"""
+
+    _INDEX_META = {
+        "000001": {"market": "SH", "name": "上证指数"},
+        "399001": {"market": "SZ", "name": "深证成指"},
+        "399006": {"market": "SZ", "name": "创业板指"},
+    }
     
     def __init__(self):
         self.headers = config.EASTMONEY_HEADERS
         self.ut = "fa5fd1943c7b386f172d6893dbbd1d0c"
         
+    @staticmethod
+    def _split_code_market(code: str) -> tuple[str, Optional[str]]:
+        """解析代码和显式市场；裸代码按普通股票处理，避免000001歧义。"""
+        raw = (code or "").strip().upper()
+        if raw.startswith(("SH.", "SZ.", "BJ.")):
+            market, pure = raw.split(".", 1)
+            return pure, market
+        if raw.startswith(("SH", "SZ", "BJ")) and raw[2:].isdigit():
+            return raw[2:], raw[:2]
+        if "." in raw:
+            pure, suffix = raw.rsplit(".", 1)
+            if suffix in {"SH", "SZ", "BJ"}:
+                return pure, suffix
+        return raw, None
+
     def _parse_secid(self, code: str) -> str:
-        """解析股票代码为东财 secid 格式（市场.代码）"""
-        # 去掉可能的后缀 .SH / .SZ
-        pure_code = code.split(".")[0]
-        # 沪市：60x/688/000001(上证指数)/51x(ETF) → 市场1；深市：00x/300/399xxx/15x → 市场0
-        if pure_code.startswith(("6", "5", "688")) or pure_code in ("000001",):
-            # 特殊处理：399开头的是深市指数
-            if pure_code.startswith("399"):
-                return f"0.{pure_code}"
+        """解析为东财 secid；指数必须通过 .SH/.SZ 显式消除代码歧义。"""
+        pure_code, explicit_market = self._split_code_market(code)
+        if explicit_market == "SH":
             return f"1.{pure_code}"
-        else:
+        if explicit_market in {"SZ", "BJ"}:
             return f"0.{pure_code}"
+        # 裸 000001 按平安银行（深市）处理；上证指数必须写 000001.SH。
+        if pure_code.startswith(("5", "6")):
+            return f"1.{pure_code}"
+        return f"0.{pure_code}"
 
     @staticmethod
     def _safe_float(v, default=None) -> Optional[float]:
@@ -245,6 +312,30 @@ class EastmoneyAPI:
         if result:
             _QUOTE_CACHE[code] = (time.time(), result)
         return result
+
+    async def get_index_quote(self, code: str) -> Optional[Dict]:
+        """获取主要指数行情，并校验身份，防止000001回退成平安银行。"""
+        pure_code, _ = self._split_code_market(code)
+        meta = self._INDEX_META.get(pure_code)
+        if not meta:
+            raise ValueError(f"unsupported index code: {code}")
+        explicit_code = f"{pure_code}.{meta['market']}"
+        quote = await self.get_stock_quote(explicit_code)
+        if not quote:
+            return None
+
+        source_name = str(quote.get("name") or "")
+        price = float(quote.get("price") or 0)
+        # 三个宽基指数长期点位均显著高于100；名称不符或低价通常意味着市场映射错误。
+        if source_name != meta["name"] or price < 100:
+            logger.error(
+                "指数身份校验失败 %s: source_name=%s price=%s",
+                explicit_code,
+                source_name,
+                price,
+            )
+            return None
+        return {**quote, "code": pure_code, "name": meta["name"], "is_index": True}
 
     async def _quote_from_sina(self, code: str) -> Optional[Dict]:
         """从新浪获取个股实时行情（东财的备选）"""
@@ -361,8 +452,12 @@ class EastmoneyAPI:
 
     def _sina_symbol(self, code: str) -> str:
         """转换股票代码为新浪格式：sz000791 / sh600519"""
-        pure = code.split(".")[0]
-        if pure.startswith(("6", "5", "688")):
+        pure, explicit_market = self._split_code_market(code)
+        if explicit_market == "SH":
+            return f"sh{pure}"
+        if explicit_market in {"SZ", "BJ"}:
+            return f"sz{pure}"
+        if pure.startswith(("6", "5")):
             return f"sh{pure}"
         return f"sz{pure}"
 
@@ -798,7 +893,12 @@ class EastmoneyAPI:
 
         # 部分成功也写入缓存（覆盖式 — 大概率是 universe 主体）
         if len(all_results) >= max(100, limit // 5):
-            _save_universe_cache(sort_by, all_results)
+            _save_universe_cache(
+                sort_by,
+                all_results,
+                requested_limit=limit,
+                failed_pages=failed_pages,
+            )
             if failed_pages > 0:
                 logger.info(f"universe sort_by={sort_by} 部分成功 {len(all_results)}/{limit}，"
                             f"已写入缓存（{failed_pages} 页失败）")
@@ -998,12 +1098,12 @@ class EastmoneyAPI:
 
     async def get_market_overview(self) -> Dict:
         """获取市场全貌数据（供 agents 分析用）"""
-        indices = ["000001", "399001", "399006"]
+        indices = ["000001.SH", "399001.SZ", "399006.SZ"]
         overview = {"indices": {}, "sectors": [], "flow": {}}
         for code in indices:
-            quote = await self.get_stock_quote(code)
+            quote = await self.get_index_quote(code)
             if quote:
-                overview["indices"][code] = quote
+                overview["indices"][quote["code"]] = quote
         overview["sectors"] = await self.get_sector_ranking()
         overview["flow"] = await self.get_market_flow()
         return overview

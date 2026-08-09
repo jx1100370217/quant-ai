@@ -1,10 +1,15 @@
 'use client'
 
-import { useState, useEffect } from 'react'
-import { RefreshCw, TrendingUp } from 'lucide-react'
+import { useEffect, useMemo, useState } from 'react'
+import { ArrowUpRight, RefreshCw, Waves } from 'lucide-react'
+import { getMarketTone } from '../lib/marketColors'
 
 interface SectorData {
-  code: string; name: string; change: number; flow: number; flowRate: number
+  code: string
+  name: string
+  change: number
+  flow: number
+  flowRate: number
 }
 
 export default function SectorFlow() {
@@ -13,81 +18,80 @@ export default function SectorFlow() {
 
   const fetchData = async () => {
     try {
-      const res = await fetch('/api/market')
+      const res = await fetch('/api/market', { cache: 'no-store' })
       const data = await res.json()
-      if (data.success && data.sectors) setSectors(data.sectors.slice(0, 5))
-    } catch (e) { console.error(e) }
-    finally { setLoading(false) }
+      if (data.success && data.sectors) setSectors(data.sectors.slice(0, 7))
+    } catch (error) {
+      console.error('sector flow failed', error)
+    } finally {
+      setLoading(false)
+    }
   }
 
   useEffect(() => {
     fetchData()
-    const timer = setInterval(fetchData, 30000)
-    return () => clearInterval(timer)
+    const timer = window.setInterval(fetchData, 30000)
+    return () => window.clearInterval(timer)
   }, [])
 
-  const formatFlow = (v: number) => {
-    const abs = Math.abs(v)
-    if (abs >= 1e8) return `${(v / 1e8).toFixed(1)}亿`
-    if (abs >= 1e4) return `${(v / 1e4).toFixed(0)}万`
-    return v.toFixed(0)
-  }
+  const maxFlow = useMemo(() => Math.max(...sectors.map(s => Math.abs(s.flow)), 1), [sectors])
 
-  if (loading) {
-    return <div className="cyber-card p-5 animate-pulse"><div className="h-6 bg-gray-700 rounded mb-4" /><div className="space-y-3">{[1,2,3,4,5].map(i=><div key={i} className="h-14 bg-gray-700 rounded" />)}</div></div>
+  const formatFlow = (value: number) => {
+    const abs = Math.abs(value)
+    if (abs >= 1e8) return `${(value / 1e8).toFixed(1)}亿`
+    if (abs >= 1e4) return `${(value / 1e4).toFixed(0)}万`
+    return value.toFixed(0)
   }
 
   return (
-    <div className="cyber-card p-5">
-      <div className="flex items-center justify-between mb-3">
-        <div className="flex items-center space-x-2">
-          <TrendingUp className="w-5 h-5 text-neon-cyan" />
-          <h2 className="text-lg font-semibold">行业轮动</h2>
+    <div className="quant-panel relative h-full overflow-hidden p-6">
+      <div className="panel-corner panel-corner-bl" />
+      <div className="mb-6 flex items-start justify-between gap-4">
+        <div>
+          <div className="panel-kicker">CAPITAL ROTATION</div>
+          <div className="mt-2 flex items-center gap-3">
+            <h2 className="text-xl font-semibold text-white">行业资金雷达</h2>
+            <span className="rounded border border-cyan-400/10 bg-cyan-400/[0.04] px-2 py-0.5 font-mono text-[9px] text-cyan-500">NET INFLOW</span>
+          </div>
         </div>
-        <div className="flex items-center space-x-2 text-xs">
-          <span className="px-2 py-0.5 rounded bg-cyan-900/50 text-cyan-400">主力净流入</span>
-          <RefreshCw className="w-3 h-3 text-gray-500" />
-        </div>
+        <RefreshCw className={`h-3.5 w-3.5 text-slate-600 ${loading ? 'animate-spin' : ''}`} />
       </div>
 
-      {/* 表头 */}
-      <div className="grid grid-cols-12 gap-2 text-xs text-gray-500 mb-2 px-2">
-        <div className="col-span-1">排名</div>
-        <div className="col-span-5">板块</div>
-        <div className="col-span-3 text-right">涨跌幅</div>
-        <div className="col-span-3 text-right">主力净流入</div>
+      <div className="mb-3 grid grid-cols-[36px_1fr_80px_92px] gap-3 px-3 font-mono text-[9px] uppercase tracking-[0.15em] text-slate-700">
+        <span>Rank</span><span>Sector / momentum</span><span className="text-right">Change</span><span className="text-right">Inflow</span>
       </div>
 
-      <div className="space-y-1.5">
-        {sectors.map((s, i) => {
-          const isTop3 = i < 3
+      <div className="space-y-2">
+        {loading && sectors.length === 0 ? (
+          [1, 2, 3, 4, 5].map(i => <div key={i} className="h-14 animate-pulse rounded-xl bg-slate-900/50" />)
+        ) : sectors.length === 0 ? (
+          <div className="flex h-48 items-center justify-center text-xs text-slate-600">行业资金数据暂不可用</div>
+        ) : sectors.map((sector, index) => {
+          const changeTone = getMarketTone(sector.change)
+          const flowTone = getMarketTone(sector.flow)
+          const barWidth = Math.max(8, Math.abs(sector.flow) / maxFlow * 100)
           return (
-            <div key={s.code} className={`grid grid-cols-12 gap-2 items-center p-2.5 rounded-lg transition-colors ${isTop3 ? 'bg-red-900/10 hover:bg-red-900/20' : 'bg-gray-900/30 hover:bg-gray-800/40'}`}>
-              {/* 排名 */}
-              <div className="col-span-1">
-                <span className={`inline-flex items-center justify-center w-5 h-5 rounded text-xs font-bold ${isTop3 ? 'bg-red-600 text-white' : 'bg-gray-700 text-gray-400'}`}>
-                  {i + 1}
-                </span>
+            <div key={sector.code} className="sector-row group grid grid-cols-[36px_1fr_80px_92px] items-center gap-3">
+              <span className={`flex h-7 w-7 items-center justify-center rounded-lg border font-mono text-[10px] ${index < 3 ? 'border-cyan-400/20 bg-cyan-400/[0.07] text-cyan-300' : 'border-slate-800 text-slate-600'}`}>{String(index + 1).padStart(2, '0')}</span>
+              <div className="min-w-0">
+                <div className="flex items-center gap-2">
+                  <span className="truncate text-sm font-medium text-slate-300 group-hover:text-white">{sector.name}</span>
+                  {index === 0 && <ArrowUpRight className="h-3 w-3 text-cyan-400" />}
+                </div>
+                <div className="mt-2 h-0.5 overflow-hidden rounded-full bg-slate-900">
+                  <div className={`h-full rounded-full ${sector.flow >= 0 ? 'bg-gradient-to-r from-red-500/40 to-red-400' : 'bg-gradient-to-r from-emerald-500/40 to-emerald-400'}`} style={{ width: `${barWidth}%` }} />
+                </div>
               </div>
-              {/* 板块名 */}
-              <div className="col-span-5">
-                <span className="text-sm font-medium">{s.name}</span>
-              </div>
-              {/* 涨跌幅 */}
-              <div className="col-span-3 text-right">
-                <span className={`text-sm font-mono font-bold ${s.change >= 0 ? 'text-red-400' : 'text-green-400'}`}>
-                  {s.change >= 0 ? '+' : ''}{s.change.toFixed(2)}%
-                </span>
-              </div>
-              {/* 主力净流入 */}
-              <div className="col-span-3 text-right">
-                <span className={`text-sm font-mono font-bold ${s.flow > 0 ? 'text-red-400' : 'text-green-400'}`}>
-                  {formatFlow(s.flow)}
-                </span>
-              </div>
+              <span className={`text-right font-mono text-xs font-semibold ${changeTone.text}`}>{sector.change > 0 ? '+' : ''}{sector.change.toFixed(2)}%</span>
+              <span className={`text-right font-mono text-xs font-semibold ${flowTone.text}`}>{formatFlow(sector.flow)}</span>
             </div>
           )
         })}
+      </div>
+
+      <div className="mt-4 flex items-center gap-2 border-t border-slate-800/60 pt-4 text-[10px] text-slate-600">
+        <Waves className="h-3 w-3 text-indigo-500" />
+        按主力净流入强度排序 · 30 秒更新
       </div>
     </div>
   )

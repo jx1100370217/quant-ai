@@ -42,30 +42,31 @@ import numpy as np
 
 from data.eastmoney import eastmoney_api
 from .models import StockCandidate
+from .strategy import STRATEGY
 
 logger = logging.getLogger(__name__)
 
 # ─── 策略窗口配置（V12b / score_v7）─────────────────────────
-# v12b 评分需要 ≥30 根历史；ATR 锚定 20 日，bounce 锚定 5 日，RSI6 锚定 7 日。
-LOOKBACK_DAYS = 30
+# v12b 评分需要 ≥30 根历史；bounce 锚定 5 日，RSI6 锚定 7 日。
+LOOKBACK_DAYS = STRATEGY.lookback_days
 # 拉取 K 线时多取 10 根作为缓冲
-KLINE_FETCH_LIMIT = LOOKBACK_DAYS + 10
+KLINE_FETCH_LIMIT = LOOKBACK_DAYS + STRATEGY.kline_buffer_days
 # Bounce 硬过滤：5 日低点反弹 ≥ 3.5%（v12b 不设上限）
-BOUNCE_FLOOR = 3.5
+BOUNCE_FLOOR = STRATEGY.bounce_floor
 # “先跌后弹”硬约束：7 日内仍需处于明确回撤区间
-MIN_DECLINE_7D = -25.0
-MAX_DECLINE_7D = -5.0
+MIN_DECLINE_7D = STRATEGY.min_decline_7d
+MAX_DECLINE_7D = STRATEGY.max_decline_7d
 # 量能硬过滤：量比（当日量 / 前 5 日均量）≥ 1.5
 # 2026-05-31 多年回测优化：从 1.2 收紧到 1.5（更强的量能确认=更高信念的反转）。
 # 样本外(2024-26) 累计 +142%→+164%、夏普 1.51→1.62，且 4/6 年不输基线、
 # 尤其救回最差的 2022/2023 弱年。≥1.8/2.0 则过紧（样本外掉到 +54%），1.5 为内部最优。
-VOL_RATIO_FLOOR = 1.5
+VOL_RATIO_FLOOR = STRATEGY.vol_ratio_floor
 # 入选反转候选的最低反转分（候选层最终门槛）
-MIN_REVERSAL_SCORE = 40
+MIN_REVERSAL_SCORE = STRATEGY.min_reversal_score
 # V12b 大中盘 universe：总市值 ≥ 100 亿（近似 HS300+ZZ500，挡住小盘脉冲陷阱）
-BLUE_CHIP_CAP = 100.0
+BLUE_CHIP_CAP = STRATEGY.min_market_cap_b
 # Universe 目标规模：先按成交额拉全 A 股 ≈ 5300，再用市值门槛收到大中盘
-DEFAULT_UNIVERSE_LIMIT = 5500
+DEFAULT_UNIVERSE_LIMIT = STRATEGY.universe_limit
 
 
 def _calc_rsi(closes, period: int = 6) -> float:
@@ -206,7 +207,10 @@ def score_reversal(
 # 反转候选扫描 — V12b 大中盘 universe + score_v7 打分
 # ─────────────────────────────────────────────────────────────
 
-async def scan_reversal_candidates(limit: int = DEFAULT_UNIVERSE_LIMIT) -> List[StockCandidate]:
+async def scan_reversal_candidates(
+    limit: int = DEFAULT_UNIVERSE_LIMIT,
+    scan_stats: Optional[Dict[str, Any]] = None,
+) -> List[StockCandidate]:
     """
     扫描 V12b 大中盘反转候选：
 
@@ -217,6 +221,18 @@ async def scan_reversal_candidates(limit: int = DEFAULT_UNIVERSE_LIMIT) -> List[
     4. 反转分 ≥ 40 入选；按反转分降序返回
     """
     logger.info(f"反转策略扫描：V12b 大中盘 universe（先拉全 A 股 ≈ {limit}，再筛市值≥{BLUE_CHIP_CAP:.0f}亿）")
+
+    if scan_stats is not None:
+        scan_stats.clear()
+        scan_stats.update({
+            "requested": limit,
+            "received": 0,
+            "market_cap_eligible": 0,
+            "kline_evaluated": 0,
+            "kline_failed": 0,
+            "candidates": 0,
+            "data_complete": False,
+        })
 
     try:
         # 先按成交额降序拉全 A 股 —— 保证流动性头部覆盖完整
@@ -234,12 +250,17 @@ async def scan_reversal_candidates(limit: int = DEFAULT_UNIVERSE_LIMIT) -> List[
             if code and code not in stocks_by_code:
                 stocks_by_code[code] = s
         stocks = list(stocks_by_code.values())
+        if scan_stats is not None:
+            scan_stats["received"] = len(stocks)
+            scan_stats["data_complete"] = len(stocks) >= max(1, int(limit * 0.90))
 
         # ── V12b 大中盘过滤：总市值 ≥ BLUE_CHIP_CAP 亿（近似 HS300+ZZ500）──
         # 这是 V12b 真正挡住小盘脉冲陷阱的那一刀；全 A 股 universe 会放进
         # 联合水务(48亿)/倍杰特(63亿) 这类小盘深 V，市值门槛把它们排除。
         before_cap = len(stocks)
         stocks = [s for s in stocks if (s.get("market_cap_b") or 0) >= BLUE_CHIP_CAP]
+        if scan_stats is not None:
+            scan_stats["market_cap_eligible"] = len(stocks)
         logger.info(
             f"universe 大中盘过滤：{before_cap} → {len(stocks)} 只"
             f"（市值≥{BLUE_CHIP_CAP:.0f}亿，近似 HS300+ZZ500）"
@@ -250,10 +271,11 @@ async def scan_reversal_candidates(limit: int = DEFAULT_UNIVERSE_LIMIT) -> List[
         # 提升到 24 后实测整轮缩短到 ~90s。
         semaphore = asyncio.Semaphore(24)
         kline_failed = 0
+        kline_evaluated = 0
         scored_count = 0
 
         async def _fetch_and_score(stock: Dict) -> Optional[StockCandidate]:
-            nonlocal kline_failed, scored_count
+            nonlocal kline_failed, kline_evaluated, scored_count
             async with semaphore:
                 code = stock.get("code", "")
                 name = stock.get("name", "")
@@ -274,6 +296,7 @@ async def scan_reversal_candidates(limit: int = DEFAULT_UNIVERSE_LIMIT) -> List[
                     if not klines or len(klines) < LOOKBACK_DAYS:
                         kline_failed += 1
                         return None
+                    kline_evaluated += 1
 
                     closes  = np.array([k["close"]  for k in klines], dtype=float)
                     volumes = np.array([k["volume"] for k in klines], dtype=float)
@@ -332,6 +355,12 @@ async def scan_reversal_candidates(limit: int = DEFAULT_UNIVERSE_LIMIT) -> List[
             [c for c in results if c is not None],
             key=lambda x: x.reversal_score, reverse=True,
         )
+        if scan_stats is not None:
+            scan_stats.update({
+                "kline_evaluated": kline_evaluated,
+                "kline_failed": kline_failed,
+                "candidates": len(candidates),
+            })
 
         logger.info(
             f"反转策略筛选完成：通过过滤 {len(candidates)} 只 "
@@ -348,4 +377,6 @@ async def scan_reversal_candidates(limit: int = DEFAULT_UNIVERSE_LIMIT) -> List[
 
     except Exception as e:
         logger.error(f"反转候选扫描失败: {e}")
+        if scan_stats is not None:
+            scan_stats["error"] = f"{type(e).__name__}: {e}"
         return []

@@ -1,15 +1,23 @@
 'use client'
 
-import { useState, useEffect } from 'react'
-import { TrendingUp, TrendingDown, RefreshCw } from 'lucide-react'
+import { useEffect, useState } from 'react'
+import { Activity, Minus, RefreshCw, TrendingDown, TrendingUp } from 'lucide-react'
+import { getMarketTone, marketArrow } from '../lib/marketColors'
 
 interface IndexData {
-  code: string; name: string; current: number; change: number; changePercent: number;
-  volume: number; amount: number
+  code: string
+  name: string
+  current: number
+  change: number
+  changePercent: number
+  volume: number
+  amount: number
 }
 
-interface SectorData {
-  code: string; name: string; change: number; flow: number; flowRate: number
+const INDEX_LABELS: Record<string, string> = {
+  '000001': 'SSE COMPOSITE',
+  '399001': 'SZSE COMPONENT',
+  '399006': 'CHINEXT PRICE',
 }
 
 export default function MarketOverview() {
@@ -19,76 +27,93 @@ export default function MarketOverview() {
 
   const fetchData = async () => {
     try {
-      const res = await fetch('/api/market')
+      const res = await fetch('/api/market', { cache: 'no-store' })
       const data = await res.json()
       if (data.success) {
-        setIndices(data.indices)
-        setLastUpdate(new Date().toLocaleTimeString('zh-CN'))
+        setIndices(data.indices || [])
+        setLastUpdate(new Date().toLocaleTimeString('zh-CN', { hour12: false }))
       }
-    } catch (e) { console.error('fetch market failed', e) }
-    finally { setLoading(false) }
+    } catch (error) {
+      console.error('fetch market failed', error)
+    } finally {
+      setLoading(false)
+    }
   }
 
   useEffect(() => {
     fetchData()
-    const timer = setInterval(fetchData, 15000) // 每15秒刷新
-    return () => clearInterval(timer)
+    const timer = window.setInterval(fetchData, 15000)
+    return () => window.clearInterval(timer)
   }, [])
 
-  const nameMap: Record<string, string> = { '000001': '上证指数', '399001': '深证成指', '399006': '创业板指' }
-
-  if (loading) {
-    return (
-      <div className="cyber-card p-6 animate-pulse">
-        <div className="h-8 bg-gray-700 rounded mb-4" />
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          {[1,2,3].map(i => <div key={i} className="h-24 bg-gray-700 rounded" />)}
-        </div>
-      </div>
-    )
-  }
-
   return (
-    <div className="cyber-card p-6">
-      <div className="flex items-center justify-between mb-4">
-        <h2 className="text-lg font-semibold">市场概览</h2>
-        <div className="flex items-center space-x-2 text-xs text-gray-500">
-          <RefreshCw className="w-3 h-3" />
-          <span>实时</span>
-          {lastUpdate && <span className="text-gray-600">更新于 {lastUpdate}</span>}
+    <div className="quant-panel relative h-full overflow-hidden p-6">
+      <div className="panel-corner panel-corner-tl" />
+      <div className="mb-6 flex items-start justify-between gap-4">
+        <div>
+          <div className="panel-kicker">MARKET PULSE</div>
+          <div className="mt-2 flex items-center gap-3">
+            <h2 className="text-xl font-semibold text-white">核心指数</h2>
+            <span className="hidden items-center gap-1.5 rounded-full border border-emerald-400/10 bg-emerald-400/[0.04] px-2 py-1 font-mono text-[9px] text-emerald-400 sm:inline-flex">
+              <span className="h-1 w-1 rounded-full bg-emerald-400 animate-pulse" /> LIVE FEED
+            </span>
+          </div>
+        </div>
+        <div className="flex items-center gap-2 font-mono text-[9px] text-slate-600">
+          <RefreshCw className={`h-3 w-3 ${loading ? 'animate-spin' : ''}`} />
+          {lastUpdate || 'SYNCING'}
         </div>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        {indices.map((idx) => {
-          const isUp = idx.changePercent >= 0
-          return (
-            <div key={idx.code} className={`p-4 rounded-lg border ${isUp ? 'border-red-900/30 bg-red-900/10' : 'border-green-900/30 bg-green-900/10'}`}>
-              <div className="flex justify-between items-start mb-2">
-                <div>
-                  <div className="text-sm text-gray-400">{nameMap[idx.code] || idx.name}</div>
-                  <div className="text-xs text-gray-600 font-mono">{idx.code}</div>
+      {loading && indices.length === 0 ? (
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+          {[1, 2, 3].map(i => <div key={i} className="h-40 animate-pulse rounded-2xl border border-slate-800 bg-slate-900/40" />)}
+        </div>
+      ) : indices.length === 0 ? (
+        <div className="flex h-40 items-center justify-center rounded-2xl border border-dashed border-slate-800 text-xs text-slate-600">指数数据暂不可用</div>
+      ) : (
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+          {indices.map((idx, index) => {
+            const tone = getMarketTone(idx.changePercent)
+            const DirectionIcon = tone.direction === 'up' ? TrendingUp : tone.direction === 'down' ? TrendingDown : Minus
+            const glow = tone.direction === 'up' ? 'market-card-up' : tone.direction === 'down' ? 'market-card-down' : ''
+
+            return (
+              <article key={idx.code} className={`market-index-card ${glow}`}>
+                <div className="mb-6 flex items-start justify-between">
+                  <div>
+                    <div className="text-sm font-medium text-slate-200">{idx.name}</div>
+                    <div className="mt-1 font-mono text-[9px] tracking-[0.15em] text-slate-600">{INDEX_LABELS[idx.code] || idx.code}</div>
+                  </div>
+                  <div className={`flex h-8 w-8 items-center justify-center rounded-lg border ${tone.border} ${tone.background}`}>
+                    <DirectionIcon className={`h-4 w-4 ${tone.text}`} />
+                  </div>
                 </div>
-                {isUp ? <TrendingUp className="w-4 h-4 text-red-500" /> : <TrendingDown className="w-4 h-4 text-green-500" />}
-              </div>
-              <div className={`text-2xl font-bold font-mono ${isUp ? 'text-red-400' : 'text-green-400'}`}>
-                {idx.current.toFixed(2)}
-              </div>
-              <div className="flex items-center space-x-3 mt-1 text-sm font-mono">
-                <span className={isUp ? 'text-red-400' : 'text-green-400'}>
-                  {isUp ? '↑' : '↓'} {Math.abs(idx.change).toFixed(2)}
-                </span>
-                <span className={`px-1.5 py-0.5 rounded text-xs ${isUp ? 'bg-red-900/30 text-red-400' : 'bg-green-900/30 text-green-400'}`}>
-                  {isUp ? '+' : ''}{idx.changePercent.toFixed(2)}%
-                </span>
-              </div>
-              <div className="flex items-center justify-between mt-2 text-xs text-gray-500">
-                <span>成交量 {(idx.volume / 1e8).toFixed(1)}亿</span>
-                <span>成交额 {(idx.amount / 1e8).toFixed(0)}亿</span>
-              </div>
-            </div>
-          )
-        })}
+
+                <div className={`font-mono text-3xl font-semibold tracking-[-0.04em] ${tone.text}`}>
+                  {idx.current.toFixed(2)}
+                </div>
+                <div className="mt-2 flex items-center gap-2 font-mono text-xs">
+                  <span className={tone.text}>{marketArrow(idx.changePercent)} {Math.abs(idx.change).toFixed(2)}</span>
+                  <span className={`rounded px-1.5 py-0.5 ${tone.background} ${tone.text}`}>
+                    {idx.changePercent > 0 ? '+' : ''}{idx.changePercent.toFixed(2)}%
+                  </span>
+                </div>
+
+                <div className="mt-5 flex items-center justify-between border-t border-slate-800/70 pt-3 font-mono text-[9px] text-slate-600">
+                  <span>VOL {(idx.volume / 1e8).toFixed(1)}亿</span>
+                  <span>AMT {(idx.amount / 1e8).toFixed(0)}亿</span>
+                </div>
+                <span className="absolute bottom-3 right-3 font-mono text-[9px] text-slate-800">0{index + 1}</span>
+              </article>
+            )
+          })}
+        </div>
+      )}
+
+      <div className="mt-4 flex items-center gap-2 text-[10px] text-slate-600">
+        <Activity className="h-3 w-3 text-cyan-600" />
+        行情颜色遵循 A 股惯例：上涨红 · 下跌绿
       </div>
     </div>
   )

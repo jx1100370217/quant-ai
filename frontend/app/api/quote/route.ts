@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server'
+import { toEastmoneySecid } from '../../lib/marketCode'
 
 const UT = 'fa5fd1943c7b386f172d6893dbbd1d0c'
 const HEADERS = {
@@ -6,20 +7,12 @@ const HEADERS = {
   'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
 }
 
-// 代码→secid（沪A:1.6xx/5xx, 深A:0.0xx/3xx, 指数0.399xxx/1.000xxx）
-function toSecid(code: string): string {
-  if (code.startsWith('6') || code.startsWith('5') || code.startsWith('688')) return `1.${code}`
-  if (code.startsWith('399')) return `0.${code}`
-  if (code === '000001') return `1.${code}` // 上证指数特殊处理
-  return `0.${code}`
-}
-
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url)
   const codes = (searchParams.get('codes') || '').split(',').map(c => c.trim()).filter(Boolean)
   if (codes.length === 0) return NextResponse.json({ success: false, data: [] })
 
-  const secids = codes.map(toSecid).join(',')
+  const secids = codes.map(toEastmoneySecid).join(',')
 
   // 使用 ulist.np/get + fltt=2：f9/f115/f23 在此接口能正确返回 PE/PB
   const url = `https://push2.eastmoney.com/api/qt/ulist.np/get`

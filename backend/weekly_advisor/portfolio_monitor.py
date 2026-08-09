@@ -26,18 +26,19 @@ import logging
 import os
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from data.eastmoney import eastmoney_api
 from utils.telegram import send_telegram
 
 from .models import WeeklyReport
+from .strategy import STRATEGY
 
 logger = logging.getLogger(__name__)
 
 # ── V12b 策略阈值（与 backtest_v12.py 保持一致）───────────────
-SINGLE_STOP_PCT = -6.0       # 单股浮亏冻结阈值
-PORTFOLIO_STOP_PCT = -4.0    # 组合浮亏触发阈值
+SINGLE_STOP_PCT = STRATEGY.single_stop_pct
+PORTFOLIO_STOP_PCT = STRATEGY.portfolio_stop_pct
 
 # ── 状态文件位置 ───────────────────────────────────────────────
 _BASE = Path(__file__).resolve().parent.parent
@@ -57,10 +58,13 @@ def _empty_state() -> Dict[str, Any]:
         "target_week": "",
         "generated_at": "",
         "positions": [],
-        "status": "inactive",          # inactive | active | stopped_out
+        "status": "inactive",          # inactive | active | stopped_out | expired
         "stop_triggered_at": None,
         "last_checked": None,
         "last_portfolio_pnl_pct": None,
+        "cash_position_pct": 100.0,
+        "strategy_version": STRATEGY.version,
+        "data_complete": False,
     }
 
 
@@ -94,7 +98,7 @@ async def save_active_positions(report: WeeklyReport) -> Dict[str, Any]:
     周报生成后调用：把当期推荐锁定为活跃持仓
 
     - entry_price 用 report 里的 current_price（生成时的快照价）
-    - weight_pct 用 report 的 position_pct（已按 V10_WEIGHTS 归一化）
+    - weight_pct 用 report 的总资金仓位；候选不足时剩余部分为现金
     - 若已有同 target_week 的 stopped_out 状态，仍覆盖（新周期）
     """
     if not report.recommendations:
@@ -135,6 +139,9 @@ async def save_active_positions(report: WeeklyReport) -> Dict[str, Any]:
         "stop_triggered_at": None,
         "last_checked": None,
         "last_portfolio_pnl_pct": None,
+        "cash_position_pct": float(report.cash_position_pct),
+        "strategy_version": report.strategy_version,
+        "data_complete": False,
     }
     await _write_state(state)
     logger.info(
@@ -152,11 +159,6 @@ async def clear_active_positions() -> Dict[str, Any]:
     return state
 
 
-def _weight_sum(positions: List[Dict[str, Any]]) -> float:
-    total = sum(float(p.get("weight_pct") or 0) for p in positions)
-    return total if total > 0 else 100.0
-
-
 def _target_week_start(target_week: str) -> Optional[date]:
     """解析 'YYYY-MM-DD ~ YYYY-MM-DD' 中的目标周首日。"""
     try:
@@ -164,6 +166,35 @@ def _target_week_start(target_week: str) -> Optional[date]:
         return datetime.strptime(start, "%Y-%m-%d").date()
     except Exception:
         return None
+
+
+def _target_week_bounds(target_week: str) -> Optional[tuple[date, date]]:
+    """解析目标周起止日；无效文本返回 None。"""
+    try:
+        start_text, end_text = [part.strip() for part in (target_week or "").split("~", 1)]
+        bounds = (
+            datetime.strptime(start_text, "%Y-%m-%d").date(),
+            datetime.strptime(end_text, "%Y-%m-%d").date(),
+        )
+        return bounds if bounds[0] <= bounds[1] else None
+    except Exception:
+        return None
+
+
+def _portfolio_window_state(
+    target_week: str,
+    today: Optional[date] = None,
+) -> Literal["not_started", "active", "expired", "invalid"]:
+    """返回组合相对目标周的状态；行情监控只允许在 active 窗口运行。"""
+    bounds = _target_week_bounds(target_week)
+    if bounds is None:
+        return "invalid"
+    check_date = today or datetime.now().date()
+    if check_date < bounds[0]:
+        return "not_started"
+    if check_date > bounds[1]:
+        return "expired"
+    return "active"
 
 
 async def _lock_entry_prices_if_ready(state: Dict[str, Any]) -> None:
@@ -223,7 +254,7 @@ async def _notify_portfolio_stop(state: Dict[str, Any]) -> None:
     """组合止损首次触发时的 Telegram 警报"""
     try:
         lines = [
-            "🚨 <b>V12b 组合止损触发</b>",
+            f"🚨 <b>{state.get('strategy_version', STRATEGY.version)} 组合止损触发</b>",
             f"🗓 目标周：{state['target_week']}",
             f"⏱ 触发时间：{state['stop_triggered_at']}",
             f"📉 组合加权浮亏：<b>{state['last_portfolio_pnl_pct']:+.2f}%</b> (阈值 {PORTFOLIO_STOP_PCT:+.1f}%)",
@@ -262,16 +293,60 @@ async def check_portfolio_stop(force_notify: bool = False) -> Dict[str, Any]:
 
     # 无活跃持仓，直接返回
     if state["status"] != "active" or not state["positions"]:
+        status_messages = {
+            "inactive": "无活跃持仓（status=inactive）",
+            "expired": "目标周已结束，旧组合不再检查",
+            "stopped_out": (
+                f"组合已触发止损（{state.get('stop_triggered_at')}），本周不再检查"
+            ),
+        }
         return {
             "status": state["status"],
             "triggered_this_call": False,
             "portfolio_pnl_pct": state.get("last_portfolio_pnl_pct"),
             "target_week": state.get("target_week", ""),
             "positions": state.get("positions", []),
-            "message": (
-                "无活跃持仓（status=inactive）" if state["status"] == "inactive"
-                else f"组合已触发止损（{state.get('stop_triggered_at')}），本周不再检查"
-            ),
+            "cash_position_pct": state.get("cash_position_pct", 100.0),
+            "data_complete": state.get("data_complete", False),
+            "message": status_messages.get(state["status"], "组合当前不可检查"),
+        }
+
+    bounds = _target_week_bounds(state.get("target_week", ""))
+    today = datetime.now().date()
+    window_state = _portfolio_window_state(state.get("target_week", ""), today)
+    if window_state == "invalid":
+        return {
+            "status": "active",
+            "triggered_this_call": False,
+            "portfolio_pnl_pct": None,
+            "target_week": state.get("target_week", ""),
+            "positions": state["positions"],
+            "cash_position_pct": state.get("cash_position_pct", 0.0),
+            "data_complete": False,
+            "message": "目标周格式无效，本轮为安全起见不检查",
+        }
+    assert bounds is not None
+    if window_state == "not_started":
+        return {
+            "status": "active",
+            "triggered_this_call": False,
+            "portfolio_pnl_pct": None,
+            "target_week": state["target_week"],
+            "positions": state["positions"],
+            "message": f"目标周尚未开始（{bounds[0]}），本轮不检查",
+        }
+    if window_state == "expired":
+        state["status"] = "expired"
+        state["last_checked"] = datetime.now().isoformat(timespec="seconds")
+        state["data_complete"] = False
+        await _write_state(state)
+        return {
+            "status": "expired",
+            "triggered_this_call": False,
+            "portfolio_pnl_pct": state.get("last_portfolio_pnl_pct"),
+            "target_week": state["target_week"],
+            "positions": state["positions"],
+            "message": f"目标周已于 {bounds[1]} 结束，旧组合已自动过期",
         }
 
     # 进入目标周后，优先把买入价锁定为目标周首日开盘价（若 K 线已可用）
@@ -290,13 +365,12 @@ async def check_portfolio_stop(force_notify: bool = False) -> Dict[str, Any]:
         return_exceptions=False,
     )
 
-    w_sum = _weight_sum(state["positions"])
     portfolio_pnl = 0.0
     fetched_count = 0
 
     for p, q in zip(state["positions"], quotes):
         if not q or not q.get("price"):
-            # 抓不到价：跳过本只贡献，保持上次浮亏（更保守是按 0 算）
+            # 任一持仓缺价时本轮不触发止损，避免把缺失数据误当作 0% 收益。
             continue
 
         current = float(q["price"])
@@ -310,13 +384,15 @@ async def check_portfolio_stop(force_notify: bool = False) -> Dict[str, Any]:
         p["last_price"] = round(current, 4)
         p["last_pnl_pct"] = round(pnl, 3)
 
-        portfolio_pnl += (float(p["weight_pct"]) / w_sum) * pnl
+        # 权重是占总资金比例；未使用的排名槽位是现金，收益贡献为 0。
+        portfolio_pnl += (float(p["weight_pct"]) / 100.0) * pnl
         fetched_count += 1
 
     portfolio_pnl = round(portfolio_pnl, 3)
     now_iso = datetime.now().isoformat(timespec="seconds")
     state["last_checked"] = now_iso
     state["last_portfolio_pnl_pct"] = portfolio_pnl
+    state["data_complete"] = fetched_count == len(state["positions"])
 
     # 数据完全缺失时，不做触发判断，避免误报
     if fetched_count == 0:
@@ -330,6 +406,23 @@ async def check_portfolio_stop(force_notify: bool = False) -> Dict[str, Any]:
             "target_week": state["target_week"],
             "positions": state["positions"],
             "message": "行情全部缺失，本轮跳过",
+        }
+
+    if fetched_count < len(state["positions"]):
+        state["last_portfolio_pnl_pct"] = None
+        await _write_state(state)
+        logger.warning(
+            f"持仓行情不完整 {fetched_count}/{len(state['positions'])}，本轮跳过组合止损判断"
+        )
+        return {
+            "status": "active",
+            "triggered_this_call": False,
+            "portfolio_pnl_pct": None,
+            "target_week": state["target_week"],
+            "positions": state["positions"],
+            "cash_position_pct": state.get("cash_position_pct", 0.0),
+            "data_complete": False,
+            "message": f"行情不完整（{fetched_count}/{len(state['positions'])}），本轮跳过",
         }
 
     triggered = portfolio_pnl <= PORTFOLIO_STOP_PCT

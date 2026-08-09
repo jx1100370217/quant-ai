@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
 
 const BACKEND_URL = process.env.BACKEND_URL || 'http://localhost:8000'
+const INDEX_ORDER = ['000001', '399001', '399006']
 
 export async function GET() {
   try {
@@ -16,7 +17,7 @@ export async function GET() {
 
     // 转换 indices 格式
     const indices = raw.indices
-      ? Object.values(raw.indices).map((d: any) => ({
+      ? INDEX_ORDER.map(code => raw.indices[code]).filter(Boolean).map((d: any) => ({
           code: d.code,
           name: d.name,
           current: d.price,

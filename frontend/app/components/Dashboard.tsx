@@ -1,421 +1,257 @@
 'use client'
 
-import { useState, useEffect, useCallback } from 'react'
-import { Activity, TrendingUp, Brain, Shield, Clock } from 'lucide-react'
+import { useEffect, useState } from 'react'
+import {
+  Activity,
+  ArrowDown,
+  ArrowRight,
+  BrainCircuit,
+  Clock3,
+  Database,
+  Radar,
+  ScanSearch,
+  ShieldCheck,
+  Sparkles,
+  Target,
+  Zap,
+} from 'lucide-react'
 import MarketOverview from './MarketOverview'
 import SectorFlow from './SectorFlow'
-import PortfolioPanel from './PortfolioPanel'
-import AgentDecisions from './AgentDecisions'
-import RiskGauge from './RiskGauge'
-import AgentChat, { LogEntry } from './AgentChat'
+import StrategyTelemetry from './StrategyTelemetry'
 import WeeklyAdvisor from './WeeklyAdvisor'
 
-export interface HoldingItem {
-  code: string
-  name: string
-  cost: number
-  shares: number
-}
+const PIPELINE = [
+  { index: '01', title: '全域扫描', detail: 'A股股票池', icon: Database },
+  { index: '02', title: '反转过滤', detail: '价格 · 量能', icon: ScanSearch },
+  { index: '03', title: '风险定标', detail: '纪律优先', icon: ShieldCheck },
+  { index: '04', title: '组合输出', detail: '现金感知', icon: Target },
+]
 
-export interface PortfolioSummary {
-  cash: number
-  totalAssets: number
-  totalMarketValue: number
-  totalPnl: number
-  todayPnl: number
-  positions: HoldingItem[]
-}
+function SignalCore() {
+  return (
+    <div className="relative mx-auto flex h-[300px] w-full max-w-[440px] items-center justify-center lg:h-[340px]">
+      <div className="signal-orbit signal-orbit-outer" />
+      <div className="signal-orbit signal-orbit-middle" />
+      <div className="signal-orbit signal-orbit-inner" />
+      <div className="absolute inset-0 radar-sweep" />
 
-const agentColors: Record<string, string> = {
-  SYSTEM: 'text-gray-500',
-  MarketAnalyst: 'text-cyan-400',
-  TechAnalyst: 'text-blue-400',
-  FundAnalyst: 'text-purple-400',
-  SentimentAnalyst: 'text-yellow-400',
-  RiskManager: 'text-green-400',
-  PortfolioMgr: 'text-cyan-300',
-}
+      <div className="relative z-10 flex h-32 w-32 flex-col items-center justify-center rounded-full border border-cyan-300/30 bg-[#071621]/90 shadow-[0_0_60px_rgba(34,211,238,0.18)]">
+        <BrainCircuit className="mb-2 h-7 w-7 text-cyan-300" />
+        <span className="font-mono text-[10px] tracking-[0.28em] text-cyan-500">QUANT CORE</span>
+        <span className="mt-1 font-mono text-xl font-semibold text-white">V14</span>
+      </div>
 
-function now() {
-  return new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+      <div className="absolute left-[3%] top-[16%] signal-node">
+        <Database className="h-3.5 w-3.5" /> DATA
+      </div>
+      <div className="absolute right-[1%] top-[32%] signal-node">
+        <Radar className="h-3.5 w-3.5" /> FACTOR
+      </div>
+      <div className="absolute bottom-[15%] left-[13%] signal-node">
+        <ShieldCheck className="h-3.5 w-3.5" /> RISK
+      </div>
+      <div className="absolute bottom-[7%] right-[13%] signal-node">
+        <Zap className="h-3.5 w-3.5" /> SIGNAL
+      </div>
+    </div>
+  )
 }
 
 export default function Dashboard() {
-  const [currentTime, setCurrentTime] = useState<string>('')
-  const [isConnected, setIsConnected] = useState(false)
-  const [lastUpdate, setLastUpdate] = useState<string>('')
-  const [mounted, setMounted] = useState(false)
-
-  // 真实持仓
-  const [holdings, setHoldings] = useState<HoldingItem[]>([])
-  const [portfolio, setPortfolio] = useState<PortfolioSummary | null>(null)
-  const [portfolioError, setPortfolioError] = useState<string | null>(null)
-
-  // 分析状态
-  const [logs, setLogs] = useState<LogEntry[]>([])
-
-  const [analysisRunning, setAnalysisRunning] = useState(false)
-
-
-
-  // 拉取真实持仓
-  const fetchPortfolio = useCallback(async () => {
-    try {
-      const res = await fetch('/api/portfolio')
-      const data = await res.json()
-      if (data.success && data.data) {
-        const p = data.data
-        const items: HoldingItem[] = p.positions.map((pos: any) => ({
-          code: pos.code,
-          name: pos.name,
-          cost: pos.cost,
-          shares: pos.shares,
-        }))
-        setHoldings(items)
-        setPortfolio({
-          cash: p.cash,
-          totalAssets: p.totalAssets,
-          totalMarketValue: p.totalMarketValue,
-          totalPnl: p.totalPnl,
-          todayPnl: p.todayPnl,
-          positions: items,
-        })
-        setPortfolioError(null)
-        // 默认选中第一只（用函数式更新避免依赖 selectedStock 旧值）
-
-      } else {
-        setPortfolioError(data.error || '获取持仓失败')
-      }
-    } catch (e: any) {
-      setPortfolioError(e.message)
-    }
-  }, [])
+  const [currentTime, setCurrentTime] = useState('--:--:--')
+  const [connected, setConnected] = useState(false)
 
   useEffect(() => {
-    setMounted(true)
-    setCurrentTime(new Date().toLocaleTimeString('zh-CN'))
-    const timer = setInterval(() => {
-      setCurrentTime(new Date().toLocaleTimeString('zh-CN'))
-    }, 1000)
-    const connectTimer = setTimeout(() => {
-      setIsConnected(true)
-      setLastUpdate(new Date().toLocaleTimeString('zh-CN'))
-    }, 2000)
-
-    // 首次加载持仓
-    fetchPortfolio()
-    // 每分钟刷新一次
-    const portfolioTimer = setInterval(fetchPortfolio, 60000)
-
+    const updateClock = () => setCurrentTime(new Date().toLocaleTimeString('zh-CN', { hour12: false }))
+    updateClock()
+    const clockTimer = window.setInterval(updateClock, 1000)
+    const connectionTimer = window.setTimeout(() => setConnected(true), 500)
     return () => {
-      clearInterval(timer)
-      clearTimeout(connectTimer)
-      clearInterval(portfolioTimer)
+      window.clearInterval(clockTimer)
+      window.clearTimeout(connectionTimer)
     }
-  }, [fetchPortfolio])
-
-  const addLog = useCallback((agent: string, message: string) => {
-    setLogs(prev => [...prev, {
-      time: now(),
-      agent,
-      color: agentColors[agent] || 'text-gray-400',
-      message,
-    }])
   }, [])
 
-  const delay = (ms: number) => new Promise(r => setTimeout(r, ms))
-
-  const runAnalysis = useCallback(async () => {
-    if (analysisRunning) return
-    if (holdings.length === 0) {
-      addLog('SYSTEM', '⚠️ 暂无持仓数据，请确认东方财富App已登录')
-      return
-    }
-    setAnalysisRunning(true)
-    setLogs([])
-    const newSignals: Array<{time:string;stock:string;code:string;action:'buy'|'sell'|'hold';confidence:number;reason:string}> = []
-
-    try {
-      addLog('SYSTEM', `🚀 启动全量分析 (持仓 ${holdings.length} 只)...`)
-      await delay(300)
-
-      // === 1. 市场分析 ===
-      addLog('MarketAnalyst', '获取大盘行情...')
-      await delay(200)
-
-      let marketData: any = null
-      try {
-        const marketRes = await fetch('/api/market')
-        marketData = await marketRes.json()
-        if (marketData.success && marketData.indices) {
-          const sh = marketData.indices['000001']
-          if (sh) {
-            addLog('MarketAnalyst', `上证 ${sh.price.toFixed(2)} (${sh.change_pct >= 0 ? '+' : ''}${sh.change_pct.toFixed(2)}%)`)
-          }
-          const sz = marketData.indices['399001']
-          if (sz) {
-            addLog('MarketAnalyst', `深证 ${sz.price.toFixed(2)} (${sz.change_pct >= 0 ? '+' : ''}${sz.change_pct.toFixed(2)}%)`)
-          }
-        }
-      } catch (e) {
-        addLog('MarketAnalyst', '⚠️ 获取大盘数据失败')
-      }
-      await delay(200)
-
-      if (marketData?.sectors?.[0]) {
-        const top = marketData.sectors[0]
-        addLog('MarketAnalyst', `板块资金流向: ${top.name} ${top.net_inflow > 0 ? '+' : ''}${(top.net_inflow / 1e8).toFixed(1)}亿 领涨`)
-      }
-      await delay(300)
-
-      const shIdx = marketData?.indices?.['000001']
-      const marketBullish = shIdx && shIdx.change_pct > 0
-      addLog('MarketAnalyst', `判断: 市场${marketBullish ? '偏多' : '偏空'}，${marketBullish ? '做多氛围良好' : '注意风险'} → 信号:${marketBullish ? '买入' : '持有'} (${marketBullish ? 78 : 55}%)`)
-      await delay(400)
-
-      // === 2. 技术分析 - 获取持仓行情 ===
-      addLog('TechAnalyst', `获取持仓股实时行情 [${holdings.map(h => h.name).join(' / ')}]...`)
-      await delay(200)
-
-      const codes = holdings.map(h => h.code).join(',')
-      let quoteData: any = null
-      try {
-        const quoteRes = await fetch(`/api/quote?codes=${codes}`)
-        quoteData = await quoteRes.json()
-      } catch (e) {
-        addLog('TechAnalyst', '⚠️ 获取行情失败')
-      }
-      await delay(200)
-
-      addLog('TechAnalyst', '分析技术指标 [价格动量 日内位置 涨跌幅]...')
-      await delay(400)
-
-      // === 3. 逐股分析 ===
-      if (quoteData?.success && quoteData.data) {
-        for (const holding of holdings) {
-          const q = quoteData.data.find((d: any) => d.code === holding.code)
-          if (!q) continue
-
-          const pnlPct = ((q.current - holding.cost) / holding.cost) * 100
-          const dayRange = q.high > 0 ? ((q.current - q.low) / (q.high - q.low)) * 100 : 50
-          const pnlAbs = (q.current - holding.cost) * holding.shares
-
-          addLog('TechAnalyst', `${holding.name}(${holding.code}) ${q.current.toFixed(3)} (${q.percent >= 0 ? '+' : ''}${q.percent.toFixed(2)}%) | ${holding.shares}股 | 累计${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(1)}% (${pnlAbs >= 0 ? '+' : ''}${pnlAbs.toFixed(0)}元)`)
-          await delay(150)
-
-          // 生成信号
-          let action: 'buy' | 'sell' | 'hold' = 'hold'
-          let confidence = 60
-          let reason = ''
-
-          if (q.percent > 8 && pnlPct > 20) {
-            action = 'sell'; confidence = 82; reason = `涨幅超${q.percent.toFixed(0)}%触发止盈线，建议减仓`
-          } else if (q.percent > 5 && pnlPct > 15) {
-            action = 'sell'; confidence = 72; reason = '短期涨幅过大，建议部分止盈'
-          } else if (pnlPct < -8) {
-            action = 'sell'; confidence = 75; reason = `亏损${pnlPct.toFixed(1)}%触发止损线，建议出局`
-          } else if (q.percent < -5 && pnlPct < -3) {
-            action = 'sell'; confidence = 65; reason = `跌幅${q.percent.toFixed(1)}%，关注止损`
-          } else if (q.percent > 2 && pnlPct > -5 && pnlPct < 15) {
-            action = 'buy'; confidence = 68; reason = '趋势向好，可适当加仓'
-          } else if (q.percent > 0 && dayRange > 70) {
-            action = 'buy'; confidence = 65; reason = '放量上涨趋势良好，继续持有或加仓'
-          } else if (q.percent < -2 && pnlPct > 10) {
-            action = 'hold'; confidence = 65; reason = '回调不深，盈利充足，继续持有'
-          } else if (Math.abs(q.percent) < 1) {
-            action = 'hold'; confidence = 60; reason = '震荡整理中，等待方向选择'
-          } else {
-            action = 'hold'; confidence = 58; reason = '维持现有仓位'
-          }
-
-          newSignals.push({
-            time: now().slice(0, 5),
-            stock: holding.name,
-            code: holding.code,
-            action, confidence, reason
-          })
-        }
-      }
-
-      await delay(300)
-
-      // === 4. 基本面分析 ===
-      addLog('FundAnalyst', `分析持仓标的基本面 [${holdings.map(h => h.name).join(' / ')}]...`)
-      await delay(500)
-      for (const h of holdings) {
-        const pnlPct = portfolio ? ((portfolio.totalPnl) / (portfolio.totalAssets - portfolio.totalPnl)) * 100 : 0
-        addLog('FundAnalyst', `${h.name}: 成本${h.cost.toFixed(3)}, ${h.shares}股, 关注行业景气度与财报催化`)
-        await delay(200)
-      }
-      addLog('FundAnalyst', '基本面评估完成')
-      await delay(300)
-
-      // === 5. 情绪分析 ===
-      addLog('SentimentAnalyst', '分析市场情绪指标...')
-      await delay(400)
-      if (marketData?.sectors) {
-        const upSectors = marketData.sectors.filter((s: any) => s.change_pct > 0).length
-        const totalSectors = marketData.sectors.length
-        addLog('SentimentAnalyst', `板块涨跌比 ${upSectors}:${totalSectors - upSectors} ${upSectors > totalSectors / 2 ? '偏多' : '偏空'}`)
-      }
-      await delay(300)
-
-      // === 6. 风险评估 ===
-      addLog('RiskManager', '评估持仓风险...')
-      await delay(400)
-      if (portfolio) {
-        const totalMV = portfolio.totalMarketValue ?? 0
-        const totalA = portfolio.totalAssets ?? 0
-        const totalP = portfolio.totalPnl ?? 0
-        const positionRatio = totalA > 0 ? (totalMV / totalA * 100).toFixed(1) : '0.0'
-        const pnlPct = totalA > 0 ? (totalP / (totalA - totalP) * 100).toFixed(1) : '0.0'
-        addLog('RiskManager', `仓位: ${positionRatio}% | 总盈亏: ${Number(pnlPct) >= 0 ? '+' : ''}${pnlPct}% | 持仓集中度: ${holdings.length === 1 ? '单一持仓(高)' : '多元化'}`)
-      }
-      const sellCount = newSignals.filter(s => s.action === 'sell').length
-      const buyCount = newSignals.filter(s => s.action === 'buy').length
-      addLog('RiskManager', `持仓检查完成 | 建议卖出:${sellCount} 买入:${buyCount} 持有:${newSignals.length - sellCount - buyCount}`)
-      await delay(300)
-
-      // === 7. 综合决策 ===
-      addLog('PortfolioMgr', '═══ 综合分析师意见 ═══')
-      await delay(200)
-      const avgConf = newSignals.length > 0 ? Math.round(newSignals.reduce((s, n) => s + n.confidence, 0) / newSignals.length) : 0
-      addLog('PortfolioMgr', `买入:${buyCount}票 持有:${newSignals.length - sellCount - buyCount}票 卖出:${sellCount}票 | 平均置信度: ${avgConf}%`)
-      await delay(200)
-
-      const overall = sellCount > buyCount ? '偏空减仓' : buyCount > sellCount ? '偏多加仓' : '维持现状'
-      addLog('PortfolioMgr', `▶ 最终决策: ${overall}`)
-      await delay(200)
-
-      for (const sig of newSignals) {
-        if (sig.action !== 'hold') {
-          const emoji = sig.action === 'buy' ? '📈' : '📉'
-          addLog('PortfolioMgr', `  → ${emoji} ${sig.stock} ${sig.action === 'buy' ? '加仓' : '减仓'} (${sig.reason})`)
-          await delay(150)
-        }
-      }
-
-      setLastUpdate(now())
-      addLog('SYSTEM', `✅ 分析完成，生成 ${newSignals.length} 条信号`)
-
-    } catch (e) {
-      addLog('SYSTEM', `❌ 分析异常: ${e}`)
-    } finally {
-      setAnalysisRunning(false)
-    }
-  }, [analysisRunning, addLog, holdings, portfolio])
+  const scrollToSignals = () => {
+    document.getElementById('weekly-signals')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
 
   return (
-    <div className="min-h-screen p-4 lg:p-6 space-y-6">
-      {/* Header */}
-      <header className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-4">
-        <div className="flex items-center space-x-4">
-          <div className="flex items-center space-x-2">
-            <Brain className="w-8 h-8 text-neon-cyan animate-pulse" />
-            <h1 className="text-3xl font-bold gradient-text">QuantAI</h1>
-          </div>
-          <div className="hidden lg:block text-sm text-gray-400">
-            量化交易AI系统 v1.0.0
-          </div>
-        </div>
+    <div className="quant-shell min-h-screen">
+      <div className="scanline-layer" aria-hidden="true" />
 
-        <div className="flex items-center space-x-6 text-sm">
-          <div className="flex items-center space-x-2">
-            <div className={`w-2 h-2 rounded-full ${isConnected ? 'bg-green-400 animate-pulse' : 'bg-red-400'}`}></div>
-            <span className={isConnected ? 'text-green-400' : 'text-red-400'}>
-              {isConnected ? '已连接' : '连接中...'}
-            </span>
-          </div>
-          {portfolio && (
-            <div className="flex items-center space-x-1 text-xs">
-              <span className="text-gray-500">总资产</span>
-              <span className="font-mono text-cyan-400">¥{((portfolio.totalAssets ?? 0) / 10000).toFixed(2)}万</span>
-              <span className={`font-mono ml-1 ${(portfolio.totalPnl ?? 0) >= 0 ? 'text-red-400' : 'text-green-400'}`}>
-                ({(portfolio.totalPnl ?? 0) >= 0 ? '+' : ''}{(portfolio.totalPnl ?? 0).toFixed(0)})
-              </span>
+      <div className="relative z-10 mx-auto w-full max-w-[1680px] px-4 pb-8 pt-3 sm:px-6 lg:px-8">
+        <header className="command-header mb-5 flex min-h-16 items-center justify-between gap-4 px-4 py-3 sm:px-5">
+          <div className="flex min-w-0 items-center gap-3">
+            <div className="brand-mark">
+              <BrainCircuit className="h-5 w-5 text-cyan-200" />
             </div>
-          )}
-          {portfolioError && (
-            <div className="text-xs text-yellow-500">⚠️ {portfolioError}</div>
-          )}
-          <div className="flex items-center space-x-2 text-gray-400">
-            <Clock className="w-4 h-4" />
-            <span className="font-mono">{currentTime || '--:--:--'}</span>
-          </div>
-          <div className="flex items-center space-x-2">
-            <Activity className="w-4 h-4 text-neon-green" />
-            <span className="text-green-400">交易中</span>
-          </div>
-          {lastUpdate && (
-            <div className="text-xs text-gray-500">更新于 {lastUpdate}</div>
-          )}
-        </div>
-      </header>
-
-      {/* 主要内容区域 */}
-      <div className="grid grid-cols-1 xl:grid-cols-12 gap-6">
-        {/* 左侧主要面板 */}
-        <div className="xl:col-span-8 space-y-6">
-          <MarketOverview />
-
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-            <div className="lg:col-span-2">
-              <AgentDecisions
-                holdings={holdings}
-                selectedCode={null}
-                onSelectStock={() => {}}
-              />
+            <div className="min-w-0">
+              <div className="flex items-center gap-2">
+                <h1 className="text-lg font-semibold tracking-tight text-white sm:text-xl">QuantAI</h1>
+                <span className="hidden rounded border border-cyan-500/20 bg-cyan-500/5 px-1.5 py-0.5 font-mono text-[9px] tracking-[0.18em] text-cyan-400 sm:inline">WEEKLY ALPHA LAB</span>
+              </div>
+              <p className="truncate text-[10px] tracking-[0.18em] text-slate-600">REVERSAL SIGNAL INTELLIGENCE</p>
             </div>
-            <div>
+          </div>
+
+          <div className="flex items-center gap-2 sm:gap-3">
+            <div className="hidden items-center gap-2 rounded-full border border-slate-800 bg-slate-950/50 px-3 py-1.5 text-[10px] text-slate-400 md:flex">
+              <Activity className="h-3.5 w-3.5 text-cyan-400" />
+              <span>策略引擎</span>
+              <span className="text-white">V14</span>
+            </div>
+            <div className="flex items-center gap-2 rounded-full border border-emerald-500/15 bg-emerald-500/5 px-3 py-1.5 text-[10px] text-emerald-300">
+              <span className={`h-1.5 w-1.5 rounded-full ${connected ? 'bg-emerald-400 shadow-[0_0_10px_#34d399]' : 'bg-amber-400 animate-pulse'}`} />
+              <span className="hidden sm:inline">{connected ? 'DATA ONLINE' : 'CONNECTING'}</span>
+              <span className="sm:hidden">LIVE</span>
+            </div>
+            <div className="flex items-center gap-2 font-mono text-[11px] text-slate-400">
+              <Clock3 className="h-3.5 w-3.5 text-slate-600" />
+              <span>{currentTime}</span>
+            </div>
+          </div>
+        </header>
+
+        <main className="space-y-5">
+          <section className="hero-grid relative overflow-hidden rounded-[28px] border border-cyan-500/15 bg-[#050b12]/90">
+            <div className="hero-glow" aria-hidden="true" />
+            <div className="grid min-h-[440px] grid-cols-1 items-center lg:grid-cols-[1.15fr_0.85fr]">
+              <div className="relative z-10 px-6 py-10 sm:px-10 lg:px-14 lg:py-14">
+                <div className="mb-5 inline-flex items-center gap-2 rounded-full border border-cyan-400/20 bg-cyan-400/[0.06] px-3 py-1.5 font-mono text-[10px] tracking-[0.2em] text-cyan-300">
+                  <Sparkles className="h-3.5 w-3.5" />
+                  SYSTEMATIC REVERSAL · WEEKLY SIGNAL
+                </div>
+
+                <h2 className="max-w-4xl text-balance text-4xl font-semibold leading-[1.08] tracking-[-0.04em] text-white sm:text-5xl lg:text-6xl">
+                  从全市场噪声中
+                  <span className="block bg-gradient-to-r from-cyan-300 via-sky-400 to-indigo-400 bg-clip-text text-transparent">提取可执行的反转信号</span>
+                </h2>
+                <p className="mt-6 max-w-2xl text-sm leading-7 text-slate-400 sm:text-base">
+                  面向周频决策的量化研究终端。以价格反转、量能确认和刚性风险边界，输出透明、可复核的候选组合。
+                </p>
+
+                <div className="mt-8 flex flex-wrap items-center gap-3">
+                  <button onClick={scrollToSignals} className="group inline-flex items-center gap-2 rounded-xl bg-cyan-300 px-5 py-3 text-sm font-semibold text-slate-950 transition hover:bg-white hover:shadow-[0_0_32px_rgba(103,232,249,0.35)]">
+                    查看本周信号
+                    <ArrowDown className="h-4 w-4 transition-transform group-hover:translate-y-0.5" />
+                  </button>
+                  <div className="inline-flex items-center gap-2 rounded-xl border border-slate-800 bg-slate-950/40 px-4 py-3 font-mono text-[11px] text-slate-500">
+                    <span className="h-1.5 w-1.5 rounded-full bg-indigo-400" />
+                    研究模式 · 非自动交易
+                  </div>
+                </div>
+
+                <div className="mt-10 grid max-w-2xl grid-cols-3 border-t border-slate-800/70 pt-5">
+                  <div>
+                    <div className="font-mono text-xl font-semibold text-white sm:text-2xl">5,500+</div>
+                    <div className="mt-1 text-[10px] uppercase tracking-[0.18em] text-slate-600">Universe</div>
+                  </div>
+                  <div className="border-l border-slate-800/70 pl-5">
+                    <div className="font-mono text-xl font-semibold text-white sm:text-2xl">W1</div>
+                    <div className="mt-1 text-[10px] uppercase tracking-[0.18em] text-slate-600">Horizon</div>
+                  </div>
+                  <div className="border-l border-slate-800/70 pl-5">
+                    <div className="font-mono text-xl font-semibold text-cyan-300 sm:text-2xl">≤ 5</div>
+                    <div className="mt-1 text-[10px] uppercase tracking-[0.18em] text-slate-600">Signals</div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="relative hidden h-full min-h-[420px] items-center border-l border-cyan-500/10 bg-cyan-400/[0.015] px-8 lg:flex">
+                <SignalCore />
+              </div>
+            </div>
+          </section>
+
+          <section aria-label="策略流程" className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+            {PIPELINE.map((step, i) => {
+              const Icon = step.icon
+              return (
+                <div key={step.index} className="pipeline-card group relative overflow-hidden">
+                  <span className="absolute right-3 top-2 font-mono text-3xl font-semibold text-white/[0.025]">{step.index}</span>
+                  <div className="flex items-center gap-3">
+                    <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-cyan-400/15 bg-cyan-400/[0.06] text-cyan-400 transition group-hover:border-cyan-300/30 group-hover:text-cyan-200">
+                      <Icon className="h-4 w-4" />
+                    </div>
+                    <div>
+                      <div className="text-sm font-medium text-slate-200">{step.title}</div>
+                      <div className="mt-0.5 font-mono text-[10px] tracking-wider text-slate-600">{step.detail}</div>
+                    </div>
+                    {i < PIPELINE.length - 1 && <ArrowRight className="ml-auto hidden h-3.5 w-3.5 text-slate-800 lg:block" />}
+                  </div>
+                </div>
+              )
+            })}
+          </section>
+
+          <section className="grid grid-cols-1 gap-5 xl:grid-cols-12">
+            <div className="xl:col-span-8">
+              <MarketOverview />
+            </div>
+            <div className="xl:col-span-4">
+              <StrategyTelemetry />
+            </div>
+          </section>
+
+          <section className="grid grid-cols-1 gap-5 xl:grid-cols-12">
+            <div className="xl:col-span-7">
               <SectorFlow />
             </div>
+            <div className="quant-panel relative overflow-hidden p-6 xl:col-span-5">
+              <div className="panel-corner panel-corner-tr" />
+              <div className="mb-6 flex items-start justify-between gap-4">
+                <div>
+                  <div className="panel-kicker">EXECUTION PROTOCOL</div>
+                  <h3 className="mt-2 text-xl font-semibold text-white">策略纪律矩阵</h3>
+                </div>
+                <ShieldCheck className="h-5 w-5 text-indigo-400" />
+              </div>
+
+              <div className="grid grid-cols-3 gap-3">
+                <div className="discipline-tile border-red-400/15 bg-red-400/[0.04]">
+                  <span className="text-[10px] text-slate-500">观察目标</span>
+                  <strong className="mt-2 font-mono text-xl text-red-400">+5%</strong>
+                </div>
+                <div className="discipline-tile border-emerald-400/15 bg-emerald-400/[0.04]">
+                  <span className="text-[10px] text-slate-500">单股风险线</span>
+                  <strong className="mt-2 font-mono text-xl text-emerald-400">-6%</strong>
+                </div>
+                <div className="discipline-tile border-emerald-400/15 bg-emerald-400/[0.04]">
+                  <span className="text-[10px] text-slate-500">组合风险线</span>
+                  <strong className="mt-2 font-mono text-xl text-emerald-400">-4%</strong>
+                </div>
+              </div>
+
+              <div className="mt-5 rounded-xl border border-slate-800/80 bg-slate-950/40 p-4">
+                <div className="mb-3 flex items-center justify-between text-[10px] uppercase tracking-[0.15em] text-slate-600">
+                  <span>Signal governance</span>
+                  <span className="text-cyan-500">Rules locked</span>
+                </div>
+                <div className="space-y-3 text-xs text-slate-400">
+                  <div className="flex items-center justify-between"><span>候选不足</span><span className="text-slate-200">保留现金，不强行满仓</span></div>
+                  <div className="h-px bg-slate-800/70" />
+                  <div className="flex items-center justify-between"><span>信号解释</span><span className="text-slate-200">因子分，不等于胜率</span></div>
+                  <div className="h-px bg-slate-800/70" />
+                  <div className="flex items-center justify-between"><span>执行原则</span><span className="text-slate-200">纪律优先于主观判断</span></div>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section id="weekly-signals" className="scroll-mt-5">
+            <WeeklyAdvisor />
+          </section>
+        </main>
+
+        <footer className="mt-5 flex flex-col items-center justify-between gap-3 border-t border-slate-900 px-1 py-5 text-[10px] tracking-wide text-slate-600 sm:flex-row">
+          <div>QUANTAI RESEARCH TERMINAL · 东方财富公开市场数据</div>
+          <div className="flex items-center gap-4">
+            <span className="inline-flex items-center gap-1.5"><span className="h-1 w-1 rounded-full bg-cyan-500" /> 数据链路正常</span>
+            <span className="inline-flex items-center gap-1.5"><ShieldCheck className="h-3 w-3" /> 研究用途</span>
           </div>
-
-
-
-          {/* 周度选股顾问 */}
-          <WeeklyAdvisor />
-        </div>
-
-        {/* 右侧边栏 */}
-        <div className="xl:col-span-4 space-y-6">
-          <PortfolioPanel />
-          <RiskGauge portfolio={portfolio} />
-          <AgentChat logs={logs} running={analysisRunning} onReanalyze={runAnalysis} />
-        </div>
+        </footer>
       </div>
-
-      {/* 底部状态栏 */}
-      <footer className="border-t border-gray-800 pt-4">
-        <div className="flex flex-col lg:flex-row justify-between items-center gap-4 text-xs text-gray-500">
-          <div className="flex items-center space-x-4">
-            <span>© 2024 QuantAI. All rights reserved.</span>
-            <span>•</span>
-            <span>数据来源：东方财富实时持仓</span>
-          </div>
-          <div className="flex items-center space-x-4">
-            <div className="flex items-center space-x-2">
-              <TrendingUp className="w-4 h-4 text-green-400" />
-              <span>系统正常运行</span>
-            </div>
-            <span>•</span>
-            <div className="flex items-center space-x-2">
-              <Shield className="w-4 h-4 text-blue-400" />
-              <span>安全模式</span>
-            </div>
-          </div>
-        </div>
-      </footer>
-
-      {!isConnected && (
-        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50">
-          <div className="cyber-card p-8 text-center">
-            <div className="w-16 h-16 mx-auto mb-4 border-4 border-cyan-500 border-t-transparent rounded-full animate-spin"></div>
-            <h3 className="text-lg font-semibold mb-2">正在连接AI系统</h3>
-            <p className="text-gray-400 text-sm">正在建立连接，请稍候...</p>
-          </div>
-        </div>
-      )}
     </div>
   )
 }

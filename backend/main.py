@@ -178,11 +178,14 @@ async def get_market_overview():
     """大盘概览（含指数 + 板块 + 市场统计）"""
     try:
         indices = ["000001.SH", "399001.SZ", "399006.SZ"]
-        overview_data = {}
-
-        for index_code in indices:
-            quote = await eastmoney.get_quote(index_code)
-            overview_data[index_code] = quote
+        index_quotes = await asyncio.gather(
+            *[eastmoney.get_index_quote(index_code) for index_code in indices]
+        )
+        overview_data = {
+            quote["code"]: quote
+            for quote in index_quotes
+            if quote is not None
+        }
 
         # 并行获取板块和市场统计
         import asyncio as _aio
@@ -702,7 +705,7 @@ async def analyze_holdings(body: dict):
 @app.post("/api/weekly-advisor/generate")
 async def generate_weekly_picks(force: bool = False):
     """
-    生成本周选股建议报告（V12b：全A股反转扫描→反转评分→Top5加权→LLM周报）
+    生成本周选股建议报告（V14：全A股反转扫描→反转评分→现金感知Top5→事实约束周报）
     - 包含并发锁，防止重复调用
     - 同日内结果会被缓存复用
     - force=True 时清除缓存，强制重新生成
@@ -723,10 +726,10 @@ async def generate_weekly_picks(force: bool = False):
 @app.get("/api/weekly-advisor/latest")
 async def get_latest_weekly_report():
     """
-    获取最新一期周报（同日内直接返回缓存，无需重新运行）
-    如果当天尚未生成，返回 404
+    获取最新一期周报：优先内存缓存，服务重启后回退到本地持久化报告。
     """
     from weekly_advisor.advisor import _REPORT_CACHE
+    from weekly_advisor.report_store import load_latest_report
     today_str = datetime.now().strftime("%Y-%m-%d")
     if _REPORT_CACHE["date"] == today_str and _REPORT_CACHE["report"] is not None:
         return {
@@ -735,11 +738,20 @@ async def get_latest_weekly_report():
             "from_cache": True,
             "timestamp": datetime.now().isoformat(),
         }
+    persisted = load_latest_report()
+    if persisted is not None:
+        return {
+            "success": True,
+            "data": persisted.model_dump(),
+            "from_cache": False,
+            "from_persistent_store": True,
+            "timestamp": datetime.now().isoformat(),
+        }
     return JSONResponse(
         status_code=404,
         content={
             "success": False,
-            "message": f"今日（{today_str}）尚未生成周度选股报告，请先调用 POST /api/weekly-advisor/generate",
+            "message": f"尚无持久化周度选股报告（查询日期 {today_str}），请先生成一次报告",
         }
     )
 
@@ -879,7 +891,8 @@ async def periodic_market_check():
     while True:
         try:
             now = datetime.now()
-            if 9 <= now.hour <= 15:
+            # 仅工作日检查；周末绝不能处理或通知旧组合。
+            if now.weekday() < 5 and 9 <= now.hour <= 15:
                 logger.info("执行定期市场检查...")
                 market_overview = await get_market_overview()
                 await manager.broadcast(json.dumps({
